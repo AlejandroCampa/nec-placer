@@ -2,12 +2,11 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y \
     build-essential git cmake libxml2-dev wget \
+    autoconf automake libtool texinfo \
     && rm -rf /var/lib/apt/lists/*
 
-# Build libredwg from source
 RUN git clone --depth 1 https://github.com/LibreDWG/libredwg.git /tmp/libredwg \
     && cd /tmp/libredwg \
-    && apt-get update && apt-get install -y autoconf automake libtool \
     && sh autogen.sh \
     && ./configure \
     && make -j4 \
