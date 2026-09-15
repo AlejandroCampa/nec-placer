@@ -3,78 +3,37 @@ import ezdxf
 import math
 import re
 import tempfile
+import subprocess
 from pathlib import Path
 
-st.set_page_config(page_title="NEC Placer", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="NEC Placer", layout="wide")
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main { background: #0e0e0e; }
-    .block-container { padding-top: 0 !important; }
-    h1 { color: white !important; }
-    .stTextInput input { background: #1a1a1a; color: white; border: 1px solid #333; }
-    .stButton button {
-        background: #e8c84a; color: black; font-weight: 800;
-        border: none; border-radius: 6px; width: 100%;
-    }
-    .stButton button:hover { background: #f0d060; }
-    .msg-user {
-        background: #1a1a1a; border-radius: 12px; padding: 12px 16px;
-        margin: 8px 0; color: #ccc; text-align: right;
-    }
-    .msg-ai {
-        background: #111; border-left: 3px solid #e8c84a;
-        border-radius: 8px; padding: 12px 16px; margin: 8px 0; color: #ddd;
-    }
-    .badge {
-        display: inline-block; background: #e8c84a22; color: #e8c84a;
-        border: 1px solid #e8c84a44; border-radius: 20px;
-        padding: 2px 12px; font-size: 12px; margin: 2px;
-    }
+    #MainMenu, footer, header {visibility: hidden;}
+    .stDeployButton {display:none;}
+    section[data-testid="stSidebar"] {display:none;}
+    .block-container {padding: 0 !important; max-width: 100% !important;}
 </style>
 """, unsafe_allow_html=True)
 
 # ── AUTH ──────────────────────────────────────────────────────────────────────
-def check_password():
-    if st.session_state.get("authenticated"):
-        return True
-
-    st.markdown("""
-    <div style='text-align:center; padding: 80px 20px 30px'>
-        <div style='font-size:48px'>⚡</div>
-        <h1 style='font-size:64px; font-weight:900; letter-spacing:-3px;
-                   background: linear-gradient(135deg,#e8c84a,#fff);
-                   -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-                   margin:0'>NEC PLACER</h1>
-        <p style='color:#888; font-size:16px; max-width:480px; margin:16px auto 0'>
-            AI-powered electrical plan preparation for Puerto Rico.<br>
-            Upload your architectural files. Get a clean canvas, instantly.
-        </p>
-        <div style='margin-top:16px'>
-            <span class='badge'>⚠️ Prototype</span>
-            <span class='badge'>Canvas cleanup only</span>
-            <span class='badge'>Receptacle placement coming soon</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns([1.5, 1, 1.5])
+if not st.session_state.get("authenticated"):
+    st.markdown("<br><br><br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        pw = st.text_input("", type="password", placeholder="Password",
-                           label_visibility="collapsed")
-        if st.button("Enter ⚡", use_container_width=True):
+        st.markdown("### NEC Placer")
+        pw = st.text_input("Password", type="password", label_visibility="collapsed",
+                           placeholder="Password")
+        if st.button("Continue", use_container_width=True):
             if pw == st.secrets.get("password", "necplacer2025"):
                 st.session_state.authenticated = True
                 st.rerun()
             else:
-                st.error("Wrong password")
-    return False
-
-if not check_password():
+                st.error("Incorrect password")
     st.stop()
 
-# ── EXTRACT LOGIC ─────────────────────────────────────────────────────────────
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
@@ -97,17 +56,70 @@ def sheet_score(name):
     if any(k in n for k in ["site","rcp","roof","ceiling"]): return 0
     return 1
 
-def process_files(uploaded_files, status):
+def dwg_to_dxf(dwg_path: Path, out_dir: Path) -> Path:
+    """Convert DWG to DXF using available tools."""
+    dxf_path = out_dir / (dwg_path.stem + ".dxf")
+
+    # Try dwg2dxf (libredwg)
+    try:
+        result = subprocess.run(
+            ["dwg2dxf", str(dwg_path), "-o", str(dxf_path)],
+            capture_output=True, timeout=30
+        )
+        if dxf_path.exists():
+            return dxf_path
+    except: pass
+
+    # Try ODA if somehow available
+    oda_paths = [
+        "/usr/bin/ODAFileConverter",
+        "/Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter",
+        r"C:\Program Files\ODA\ODAFileConverter 27.1.0\ODAFileConverter.exe"
+    ]
+    for oda in oda_paths:
+        if Path(oda).exists():
+            try:
+                tmp_in = out_dir / "oda_in"
+                tmp_out = out_dir / "oda_out"
+                tmp_in.mkdir(exist_ok=True)
+                tmp_out.mkdir(exist_ok=True)
+                import shutil
+                shutil.copy2(dwg_path, tmp_in / dwg_path.name)
+                subprocess.run([oda, str(tmp_in), str(tmp_out),
+                               "ACAD2018", "DXF", "0", "1", dwg_path.name],
+                               capture_output=True, timeout=30)
+                converted = tmp_out / (dwg_path.stem + ".dxf")
+                if converted.exists():
+                    shutil.copy2(converted, dxf_path)
+                    return dxf_path
+            except: pass
+
+    return None
+
+def process_files(uploaded_files):
     tmp = Path(tempfile.mkdtemp())
     dxf_paths = []
+    conversion_errors = []
 
-    status.write("💾 Saving uploaded files...")
     for f in uploaded_files:
         p = tmp / f.name
         p.write_bytes(f.read())
-        dxf_paths.append(p)
 
-    status.write("🔍 Analyzing files...")
+        if p.suffix.lower() == ".dwg":
+            converted = dwg_to_dxf(p, tmp)
+            if converted:
+                dxf_paths.append(converted)
+            else:
+                conversion_errors.append(f.name)
+        else:
+            dxf_paths.append(p)
+
+    if conversion_errors:
+        return None, None, f"Could not convert these DWG files (no converter available on server): {', '.join(conversion_errors)}. Please convert to DXF locally first using ODA File Converter."
+
+    if not dxf_paths:
+        return None, None, "No readable files found."
+
     file_info = []
     for p in dxf_paths:
         try:
@@ -124,20 +136,17 @@ def process_files(uploaded_files, status):
             texts = sum(1 for e in doc.modelspace()
                         if e.dxftype() in ["TEXT","MTEXT"])
             file_info.append((p,doc,has_vp,walls,texts))
-        except: pass
+        except Exception as ex:
+            pass
 
     if not file_info:
-        return None, "No readable DXF files found."
+        return None, None, "Could not read any files."
 
-    # Pick sheet
     candidates = [(f,d,w,t) for f,d,vp,w,t in file_info if vp]
     if not candidates:
         candidates = [(f,d,w,t) for f,d,vp,w,t in file_info]
     sheet_path, doc_a1, _, _ = max(candidates, key=lambda x: sheet_score(x[0].name))
 
-    status.write(f"📄 Sheet: `{sheet_path.name}`")
-
-    # Detect xref
     dxf_stems = {p.stem.lower() for p in dxf_paths}
     xref_name = None
     xref_ix = xref_iy = 0.0
@@ -160,10 +169,8 @@ def process_files(uploaded_files, status):
     if xref_name:
         master_path = next((p for p in dxf_paths if p.stem.lower()==xref_name.lower()), None)
         doc_m = next((d for p,d,_,_,_ in file_info if p==master_path), doc_a1)
-        status.write(f"🔗 Traditional xref: `{xref_name}`")
     else:
         doc_m = doc_a1
-        status.write("📦 Revit/embedded structure detected")
 
     msp_m = doc_m.modelspace()
 
@@ -173,8 +180,6 @@ def process_files(uploaded_files, status):
         ux=dx*cr-dy*sr; uy=dx*sr+dy*cr
         return ux/xref_sx, uy/xref_sy
 
-    # Read viewports
-    status.write("🗺️ Reading paper space viewports...")
     zones = []
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
@@ -186,10 +191,7 @@ def process_files(uploaded_files, status):
                     ps_w = getattr(e.dxf,'width',None)
                     ps_h = getattr(e.dxf,'height',None)
                     if vcp and vh and vh>0:
-                        if xref_name:
-                            mx,my = a1_to_master(vcp.x,vcp.y)
-                        else:
-                            mx,my = vcp.x,vcp.y
+                        mx,my = a1_to_master(vcp.x,vcp.y) if xref_name else (vcp.x,vcp.y)
                         half_h = vh/2
                         aspect = (ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
                         half_w = half_h*aspect
@@ -197,15 +199,11 @@ def process_files(uploaded_files, status):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    status.write(f"✅ Found {len(zones)} floor plan zones")
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # Extract
-    status.write("⚙️ Extracting geometry...")
     out = ezdxf.new("R2018")
     out_msp = out.modelspace()
-    copied = 0
 
     def explode(blk_name, ix, iy, sx, sy, rot, depth=0):
         if depth>5: return
@@ -251,6 +249,7 @@ def process_files(uploaded_files, status):
                         rot+math.radians(getattr(be.dxf,'rotation',0.0)),depth+1)
             except: pass
 
+    copied = 0
     for e in msp_m:
         try:
             layer=getattr(e.dxf,'layer','0')
@@ -310,7 +309,6 @@ def process_files(uploaded_files, status):
                     break
         except: pass
 
-    # Labels
     placed_labels=0
     for e in doc_a1.modelspace():
         try:
@@ -340,67 +338,57 @@ def process_files(uploaded_files, status):
                         break
         except: pass
 
-    status.write(f"✅ {copied} entities + {placed_labels} labels extracted")
-
-    # Save to temp file
     out_path = tmp / "floor_plan_clean.dxf"
     out.saveas(str(out_path))
-    return out_path.read_bytes(), None
+    return out_path.read_bytes(), f"Done. Extracted {copied} entities and {placed_labels} labels.", None
 
-# ── MAIN UI ───────────────────────────────────────────────────────────────────
-st.markdown("""
-<div style='padding: 24px 0 8px'>
-    <h1 style='font-size:36px; font-weight:900; margin:0'>⚡ NEC PLACER</h1>
-    <p style='color:#666; margin:4px 0 0'>Campa, Cerrato & Associates — Internal Tool</p>
-</div>
-""", unsafe_allow_html=True)
-
+# ── CHAT UI ───────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
-    st.session_state.messages = []
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": "Hey! Upload your DXF files for a project and I'll clean them up into a ready-to-work canvas. Just drag and drop below."
-    })
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Upload your DWG or DXF files and I'll clean them up into a ready-to-work electrical canvas. You can upload multiple files for the same project."}
+    ]
+if "result" not in st.session_state:
+    st.session_state.result = None
 
-# Chat history
+st.markdown("<h4 style='text-align:center; padding: 20px 0 10px; color: #fff'>NEC Placer</h4>",
+            unsafe_allow_html=True)
+
 for msg in st.session_state.messages:
-    if msg["role"] == "assistant":
-        st.markdown(f"<div class='msg-ai'>⚡ {msg['content']}</div>",
-                    unsafe_allow_html=True)
-    else:
-        st.markdown(f"<div class='msg-user'>{msg['content']}</div>",
-                    unsafe_allow_html=True)
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
 
-# Upload
+if st.session_state.result:
+    with st.chat_message("assistant"):
+        st.download_button(
+            "Download floor_plan_clean.dxf",
+            data=st.session_state.result,
+            file_name="floor_plan_clean.dxf",
+            mime="application/octet-stream"
+        )
+
 uploaded = st.file_uploader(
-    "Drop your DXF files here",
-    type=["dxf"],
+    "Upload DWG or DXF files",
+    type=["dxf", "dwg"],
     accept_multiple_files=True,
     label_visibility="collapsed"
 )
 
-if uploaded:
+if uploaded and not st.session_state.get("processing"):
+    st.session_state.processing = True
     names = ", ".join(f.name for f in uploaded)
     st.session_state.messages.append({
         "role": "user",
-        "content": f"📁 Uploaded: {names}"
+        "content": f"Uploaded: {names}"
     })
-    st.markdown(f"<div class='msg-user'>📁 {names}</div>", unsafe_allow_html=True)
-
-    with st.status("Processing your files...", expanded=True) as status:
-        result, error = process_files(uploaded, status)
-        if error:
-            status.update(label=f"❌ {error}", state="error")
-            st.session_state.messages.append({"role":"assistant","content":f"❌ {error}"})
-        else:
-            status.update(label="✅ Done!", state="complete")
-            msg = "Done! Your clean canvas is ready. Download it below and open in AutoCAD."
-            st.session_state.messages.append({"role":"assistant","content":msg})
-            st.markdown(f"<div class='msg-ai'>⚡ {msg}</div>", unsafe_allow_html=True)
-            st.download_button(
-                "⬇️ Download floor_plan_clean.dxf",
-                data=result,
-                file_name="floor_plan_clean.dxf",
-                mime="application/octet-stream",
-                use_container_width=True
-            )
+    with st.chat_message("assistant"):
+        with st.spinner("Processing..."):
+            result, msg, error = process_files(uploaded)
+            if error:
+                st.session_state.messages.append({"role":"assistant","content": error})
+            elif result:
+                st.session_state.result = result
+                st.session_state.messages.append({"role":"assistant","content": msg})
+            else:
+                st.session_state.messages.append({"role":"assistant","content": msg})
+    st.session_state.processing = False
+    st.rerun()
