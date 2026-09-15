@@ -153,15 +153,9 @@ def process_files(uploaded_files):
         return ux/xref_sx, uy/xref_sy
 
     # Read viewports
-       # Read viewports - DEBUG
     zones = []
-    st.write("=== DEBUG ===")
-    st.write(f"xref_name: {xref_name}")
-    st.write(f"xref_ix: {xref_ix:.1f}, xref_iy: {xref_iy:.1f}")
-    
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
-        st.write(f"Layout: {layout.name}")
         for e in layout:
             try:
                 if e.dxftype()=="VIEWPORT":
@@ -169,7 +163,6 @@ def process_files(uploaded_files):
                     vh   = getattr(e.dxf,'view_height',None)
                     ps_w = getattr(e.dxf,'width',None)
                     ps_h = getattr(e.dxf,'height',None)
-                    st.write(f"  VP raw: center=({vcp.x:.0f},{vcp.y:.0f}) h={vh:.0f} w={ps_w:.0f} ps_h={ps_h:.0f}")
                     if vcp and vh and vh>0:
                         if xref_name:
                             mx,my = a1_to_master(vcp.x,vcp.y)
@@ -178,17 +171,51 @@ def process_files(uploaded_files):
                         half_h = vh/2
                         aspect = (ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
                         half_w = half_h*aspect
-                        st.write(f"  VP master: center=({mx:.0f},{my:.0f}) half_w={half_w:.0f} half_h={half_h:.0f}")
-                        if half_w<50 or half_h<50:
-                            st.write(f"  SKIPPED (too small)")
-                            continue
+                        if half_w<50 or half_h<50: continue
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
-                        st.write(f"  ZONE: X={mx-half_w:.0f}-{mx+half_w:.0f} Y={my-half_h:.0f}-{my+half_h:.0f}")
-            except Exception as ex:
-                st.write(f"  VP error: {ex}")
+            except: pass
 
-    st.write(f"Total zones: {len(zones)}")
-    st.write("=== END DEBUG ===")
+    # Find additional floors from wall clusters within same lot X range
+    if xref_name and zones:
+        lot_x1 = min(z[0] for z in zones)
+        lot_x2 = max(z[1] for z in zones)
+        covered_y1 = min(z[2] for z in zones)
+        covered_y2 = max(z[3] for z in zones)
+
+        wall_ys = []
+        for e in msp_m:
+            try:
+                if e.dxftype()=="LINE" and getattr(e.dxf,'layer','') in \
+                   ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
+                    cx=(e.dxf.start.x+e.dxf.end.x)/2
+                    cy=(e.dxf.start.y+e.dxf.end.y)/2
+                    if lot_x1<=cx<=lot_x2 and not (covered_y1<=cy<=covered_y2):
+                        wall_ys.append(cy)
+            except: pass
+
+        if wall_ys:
+            bands = {}
+            for y in wall_ys:
+                b=round(y/500)*500
+                bands[b]=bands.get(b,0)+1
+            sb = sorted(bands.keys())
+            clusters,cur = [],([sb[0]] if sb else [])
+            for i in range(1,len(sb)):
+                if sb[i]-sb[i-1]<=1000: cur.append(sb[i])
+                else: clusters.append(cur); cur=[sb[i]]
+            if cur: clusters.append(cur)
+            for count,cluster in sorted(
+                [(sum(bands.get(b,0) for b in c),c) for c in clusters],
+                reverse=True)[:2]:
+                if count<20: continue
+                y1,y2=min(cluster)-300,max(cluster)+300
+                cy=(y1+y2)/2
+                if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
+                    zones.append((lot_x1,lot_x2,y1,y2))
+
+    if not zones:
+        zones=[(-1e9,1e9,-1e9,1e9)]
+
     # Extract geometry
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
