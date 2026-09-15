@@ -180,7 +180,41 @@ def process_files(uploaded_files):
                         if half_w<50 or half_h<50: continue
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
+            # Find basement/additional floors from wall clusters
+    if xref_name:  # only for traditional xref projects
+        wall_ys = []
+        for e in msp_m:
+            try:
+                if e.dxftype()=="LINE" and getattr(e.dxf,'layer','') in \
+                   ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
+                    cx=(e.dxf.start.x+e.dxf.end.x)/2
+                    cy=(e.dxf.start.y+e.dxf.end.y)/2
+                    wall_ys.append((cx,cy))
+            except: pass
 
+        if wall_ys:
+            xs = sorted(x for x,y in wall_ys)
+            med_x = xs[len(xs)//2]
+            lx1,lx2 = med_x-1500, med_x+1500
+            ys = [y for x,y in wall_ys if lx1<=x<=lx2]
+            bands = {}
+            for y in ys:
+                b=round(y/500)*500
+                bands[b]=bands.get(b,0)+1
+            sb = sorted(bands.keys())
+            clusters,cur = [],([sb[0]] if sb else [])
+            for i in range(1,len(sb)):
+                if sb[i]-sb[i-1]<=1000: cur.append(sb[i])
+                else: clusters.append(cur); cur=[sb[i]]
+            if cur: clusters.append(cur)
+            for count,cluster in sorted(
+                [(sum(bands.get(b,0) for b in c),c) for c in clusters],
+                reverse=True)[:4]:
+                if count<20: continue
+                y1,y2=min(cluster)-300,max(cluster)+300
+                cy=(y1+y2)/2
+                if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
+                    zones.append((lx1,lx2,y1,y2))
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
