@@ -18,7 +18,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── AUTH ──────────────────────────────────────────────────────────────────────
 if not st.session_state.get("authenticated"):
     st.markdown("<br><br><br>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1,1,1])
@@ -34,7 +33,6 @@ if not st.session_state.get("authenticated"):
                 st.error("Incorrect password")
     st.stop()
 
-# ── DWG CONVERSION ────────────────────────────────────────────────────────────
 def dwg_to_dxf(dwg_path: Path) -> Path:
     try:
         orig = os.getcwd()
@@ -48,7 +46,6 @@ def dwg_to_dxf(dwg_path: Path) -> Path:
     except: pass
     return None
 
-# ── SAME CONFIG AS WORKING extract.py ─────────────────────────────────────────
 SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
@@ -95,7 +92,6 @@ def process_files(uploaded_files):
     if not dxf_paths:
         return None, None, "No readable files found."
 
-    # Analyze files — same logic as working extract.py
     file_info = []
     for p in dxf_paths:
         try:
@@ -117,13 +113,11 @@ def process_files(uploaded_files):
     if not file_info:
         return None, None, "Could not read any files."
 
-    # Pick sheet
     candidates = [(f,d,w,t) for f,d,vp,w,t in file_info if vp]
     if not candidates:
         candidates = [(f,d,w,t) for f,d,vp,w,t in file_info]
     sheet_file,doc_a1,_,_ = max(candidates, key=lambda x: sheet_score(x[0].name))
 
-    # Detect xref
     dxf_stems = {p.stem.lower() for p in dxf_paths}
     xref_name = None
     xref_ix = xref_iy = 0.0
@@ -158,7 +152,7 @@ def process_files(uploaded_files):
         ux=dx*cr-dy*sr; uy=dx*sr+dy*cr
         return ux/xref_sx, uy/xref_sy
 
-    # Read viewports — same as working extract.py
+    # ── Read viewport zones ───────────────────────────────────────────────────
     zones = []
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
@@ -180,23 +174,24 @@ def process_files(uploaded_files):
                         if half_w<50 or half_h<50: continue
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
-            # Find basement/additional floors from wall clusters
-    if xref_name:  # only for traditional xref projects
-        wall_ys = []
+
+    # ── Find basement/additional floors from wall clusters ────────────────────
+    if xref_name:
+        wall_pts = []
         for e in msp_m:
             try:
                 if e.dxftype()=="LINE" and getattr(e.dxf,'layer','') in \
                    ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
                     cx=(e.dxf.start.x+e.dxf.end.x)/2
                     cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    wall_ys.append((cx,cy))
+                    wall_pts.append((cx,cy))
             except: pass
 
-        if wall_ys:
-            xs = sorted(x for x,y in wall_ys)
+        if wall_pts:
+            xs = sorted(x for x,y in wall_pts)
             med_x = xs[len(xs)//2]
             lx1,lx2 = med_x-1500, med_x+1500
-            ys = [y for x,y in wall_ys if lx1<=x<=lx2]
+            ys = [y for x,y in wall_pts if lx1<=x<=lx2]
             bands = {}
             for y in ys:
                 b=round(y/500)*500
@@ -215,10 +210,11 @@ def process_files(uploaded_files):
                 cy=(y1+y2)/2
                 if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
                     zones.append((lx1,lx2,y1,y2))
+
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # Extract geometry — exact same as working extract.py
+    # ── Extract geometry ──────────────────────────────────────────────────────
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
     copied  = 0
@@ -329,7 +325,7 @@ def process_files(uploaded_files):
                     break
         except: pass
 
-    # Labels — exact same as working extract.py
+    # ── Labels ────────────────────────────────────────────────────────────────
     placed_labels=0
     for e in doc_a1.modelspace():
         try:
