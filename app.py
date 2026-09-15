@@ -349,6 +349,8 @@ if "messages" not in st.session_state:
     ]
 if "result" not in st.session_state:
     st.session_state.result = None
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()
 
 st.markdown("<h4 style='text-align:center; padding: 20px 0 10px; color: #fff'>NEC Placer</h4>",
             unsafe_allow_html=True)
@@ -373,22 +375,23 @@ uploaded = st.file_uploader(
     label_visibility="collapsed"
 )
 
-if uploaded and not st.session_state.get("processing"):
-    st.session_state.processing = True
-    names = ", ".join(f.name for f in uploaded)
-    st.session_state.messages.append({
-        "role": "user",
-        "content": f"Uploaded: {names}"
-    })
-    with st.chat_message("assistant"):
-        with st.spinner("Processing..."):
-            result, msg, error = process_files(uploaded)
-            if error:
-                st.session_state.messages.append({"role":"assistant","content": error})
-            elif result:
-                st.session_state.result = result
-                st.session_state.messages.append({"role":"assistant","content": msg})
-            else:
-                st.session_state.messages.append({"role":"assistant","content": msg})
-    st.session_state.processing = False
-    st.rerun()
+if uploaded:
+    file_key = frozenset(f.name for f in uploaded)
+    if file_key not in st.session_state.processed_files:
+        st.session_state.processed_files.add(file_key)
+        names = ", ".join(f.name for f in uploaded)
+        st.session_state.messages.append({
+            "role": "user",
+            "content": f"Uploaded: {names}"
+        })
+        with st.chat_message("assistant"):
+            with st.spinner("Processing..."):
+                result, msg, error = process_files(uploaded)
+                if error:
+                    st.session_state.messages.append({"role":"assistant","content": error})
+                elif result:
+                    st.session_state.result = result
+                    st.session_state.messages.append({"role":"assistant","content": msg})
+                else:
+                    st.session_state.messages.append({"role":"assistant","content": msg})
+        st.rerun()
