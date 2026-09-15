@@ -36,17 +36,34 @@ if not st.session_state.get("authenticated"):
 
 # ── DWG CONVERSION ────────────────────────────────────────────────────────────
 def dwg_to_dxf(dwg_path: Path) -> Path:
-    """Convert DWG to DXF using libredwg (free, installed via packages.txt)"""
+    import os
+    # Find dwg2dxf wherever it is
+    result = subprocess.run(["which", "dwg2dxf"], capture_output=True, text=True)
+    which_out = result.stdout.strip()
+    
+    # Also try find
+    find_result = subprocess.run(["find", "/", "-name", "dwg2dxf", "-type", "f"], 
+                                  capture_output=True, text=True, timeout=10)
+    find_out = find_result.stdout.strip()
+    
+    st.write(f"which dwg2dxf: '{which_out}'")
+    st.write(f"find dwg2dxf: '{find_out}'")
+    
+    if not which_out and not find_out:
+        return None
+    
+    cmd = which_out or find_out.split('\n')[0]
+    
     try:
         result = subprocess.run(
-            ["dwg2dxf", str(dwg_path)],
+            [cmd, str(dwg_path)],
             capture_output=True, timeout=60
         )
         dxf_path = dwg_path.with_suffix(".dxf")
         if dxf_path.exists():
             return dxf_path
     except Exception as ex:
-        pass
+        st.write(f"Error: {ex}")
     return None
 
 # ── EXTRACT LOGIC ─────────────────────────────────────────────────────────────
