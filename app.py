@@ -4,6 +4,7 @@ import math
 import re
 import tempfile
 import subprocess
+import os
 from pathlib import Path
 
 st.set_page_config(page_title="NEC Placer", layout="wide")
@@ -26,7 +27,7 @@ if not st.session_state.get("authenticated"):
         pw = st.text_input("Password", type="password",
                            label_visibility="collapsed", placeholder="Password")
         if st.button("Continue", use_container_width=True):
-            if pw == st.secrets.get("password", "necplacer2025"):
+            if pw == os.environ.get("password", "necplacer2025"):
                 st.session_state.authenticated = True
                 st.rerun()
             else:
