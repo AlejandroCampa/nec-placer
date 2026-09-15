@@ -14,6 +14,9 @@ RUN git clone --depth 1 https://github.com/LibreDWG/libredwg.git /tmp/libredwg \
     && ldconfig \
     && rm -rf /tmp/libredwg
 
+# Verify dwg2dxf is installed - build fails here if not found
+RUN which dwg2dxf && echo "dwg2dxf OK"
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
