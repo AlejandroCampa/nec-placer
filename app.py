@@ -152,7 +152,7 @@ def process_files(uploaded_files):
         ux=dx*cr-dy*sr; uy=dx*sr+dy*cr
         return ux/xref_sx, uy/xref_sy
 
-    # ── Read viewport zones ───────────────────────────────────────────────────
+    # Read viewports
     zones = []
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
@@ -175,48 +175,10 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # ── Find basement using viewport X bounds (same lot only) ─────────────────
-    if xref_name and zones:
-        # Use the viewport X range to stay within the same lot
-        lot_x1 = min(z[0] for z in zones)
-        lot_x2 = max(z[1] for z in zones)
-
-        wall_pts = []
-        for e in msp_m:
-            try:
-                if e.dxftype()=="LINE" and getattr(e.dxf,'layer','') in \
-                   ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
-                    cx=(e.dxf.start.x+e.dxf.end.x)/2
-                    cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    # Only walls within the same lot X range
-                    if lot_x1<=cx<=lot_x2:
-                        wall_pts.append(cy)
-            except: pass
-
-        if wall_pts:
-            bands = {}
-            for y in wall_pts:
-                b=round(y/500)*500
-                bands[b]=bands.get(b,0)+1
-            sb = sorted(bands.keys())
-            clusters,cur = [],([sb[0]] if sb else [])
-            for i in range(1,len(sb)):
-                if sb[i]-sb[i-1]<=1000: cur.append(sb[i])
-                else: clusters.append(cur); cur=[sb[i]]
-            if cur: clusters.append(cur)
-            for count,cluster in sorted(
-                [(sum(bands.get(b,0) for b in c),c) for c in clusters],
-                reverse=True)[:4]:
-                if count<20: continue
-                y1,y2=min(cluster)-300,max(cluster)+300
-                cy=(y1+y2)/2
-                if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
-                    zones.append((lot_x1,lot_x2,y1,y2))
-
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # ── Extract geometry ──────────────────────────────────────────────────────
+    # Extract geometry
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
     copied  = 0
@@ -327,7 +289,7 @@ def process_files(uploaded_files):
                     break
         except: pass
 
-    # ── Labels ────────────────────────────────────────────────────────────────
+    # Labels
     placed_labels=0
     for e in doc_a1.modelspace():
         try:
