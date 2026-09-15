@@ -37,11 +37,17 @@ if not st.session_state.get("authenticated"):
 # ── DWG CONVERSION ────────────────────────────────────────────────────────────
 def dwg_to_dxf(dwg_path: Path) -> Path:
     try:
-        subprocess.run(["dwg2dxf", str(dwg_path)],
+        orig_dir = os.getcwd()
+        os.chdir(dwg_path.parent)
+        subprocess.run(["dwg2dxf", dwg_path.name],
                        capture_output=True, timeout=60)
+        os.chdir(orig_dir)
         dxf_path = dwg_path.with_suffix(".dxf")
         if dxf_path.exists():
             return dxf_path
+        alt = Path(orig_dir) / dwg_path.with_suffix(".dxf").name
+        if alt.exists():
+            return alt
     except: pass
     return None
 
