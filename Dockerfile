@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
 RUN git clone --depth 1 https://github.com/LibreDWG/libredwg.git /tmp/libredwg \
     && cd /tmp/libredwg \
     && sh autogen.sh \
-    && ./configure \
+    && ./configure --prefix=/usr \
     && make -j4 \
     && make install \
     && ldconfig \
