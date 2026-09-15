@@ -36,37 +36,23 @@ if not st.session_state.get("authenticated"):
 
 # ── DWG CONVERSION ────────────────────────────────────────────────────────────
 def dwg_to_dxf(dwg_path: Path) -> Path:
-    import os
-    # Find dwg2dxf wherever it is
-    result = subprocess.run(["which", "dwg2dxf"], capture_output=True, text=True)
-    which_out = result.stdout.strip()
-    
-    # Also try find
-    find_result = subprocess.run(["find", "/", "-name", "dwg2dxf", "-type", "f"], 
-                                  capture_output=True, text=True, timeout=10)
-    find_out = find_result.stdout.strip()
-    
-    st.write(f"which dwg2dxf: '{which_out}'")
-    st.write(f"find dwg2dxf: '{find_out}'")
-    
-    if not which_out and not find_out:
-        return None
-    
-    cmd = which_out or find_out.split('\n')[0]
-    
     try:
         result = subprocess.run(
-            [cmd, str(dwg_path)],
+            ["dwg2dxf", str(dwg_path)],
             capture_output=True, timeout=60
         )
         dxf_path = dwg_path.with_suffix(".dxf")
         if dxf_path.exists():
             return dxf_path
+        # Sometimes output goes to current dir
+        alt = Path(dwg_path.name).with_suffix(".dxf")
+        if alt.exists():
+            return alt
     except Exception as ex:
-        st.write(f"Error: {ex}")
+        st.write(f"DWG conversion error: {ex}")
     return None
 
-# ── EXTRACT LOGIC ─────────────────────────────────────────────────────────────
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
@@ -100,16 +86,19 @@ def process_files(uploaded_files):
         p.write_bytes(raw)
 
         if f.name.lower().endswith(".dwg"):
+            st.write(f"Converting {f.name}...")
             converted = dwg_to_dxf(p)
             if converted:
                 dxf_paths.append(converted)
+                st.write(f"✓ {f.name} converted")
             else:
                 conversion_errors.append(f.name)
+                st.write(f"✗ {f.name} failed")
         else:
             dxf_paths.append(p)
 
     if conversion_errors and not dxf_paths:
-        return None, None, f"Could not convert DWG files: {', '.join(conversion_errors)}. Please upload DXF files instead."
+        return None, None, f"Could not convert: {', '.join(conversion_errors)}"
 
     if not dxf_paths:
         return None, None, "No readable files found."
@@ -342,7 +331,7 @@ def process_files(uploaded_files):
 # ── CHAT UI ───────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Upload your DWG or DXF files and I'll clean them up into a ready-to-work electrical canvas. You can upload multiple files for the same project."}
+        {"role": "assistant", "content": "Upload your DWG or DXF files below, then click Process when ready."}
     ]
 if "result" not in st.session_state:
     st.session_state.result = None
@@ -365,6 +354,7 @@ if st.session_state.result:
             mime="application/octet-stream"
         )
 
+# Upload + Process button
 uploaded = st.file_uploader(
     "Upload files",
     type=["dxf","dwg"],
@@ -373,19 +363,24 @@ uploaded = st.file_uploader(
 )
 
 if uploaded:
-    file_key = frozenset(f.name for f in uploaded)
-    if file_key not in st.session_state.processed_files:
-        st.session_state.processed_files.add(file_key)
-        names = ", ".join(f.name for f in uploaded)
-        st.session_state.messages.append({"role":"user","content":f"Uploaded: {names}"})
-        with st.chat_message("assistant"):
-            with st.spinner("Processing..."):
-                result, msg, error = process_files(uploaded)
-                if error:
-                    st.session_state.messages.append({"role":"assistant","content":error})
-                elif result:
-                    st.session_state.result = result
-                    st.session_state.messages.append({"role":"assistant","content":msg})
-                else:
-                    st.session_state.messages.append({"role":"assistant","content":msg})
-        st.rerun()
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        process_btn = st.button("Process", use_container_width=True, type="primary")
+
+    if process_btn:
+        file_key = frozenset(f.name for f in uploaded)
+        if file_key not in st.session_state.processed_files:
+            st.session_state.processed_files.add(file_key)
+            names = ", ".join(f.name for f in uploaded)
+            st.session_state.messages.append({"role":"user","content":f"Uploaded: {names}"})
+            with st.chat_message("assistant"):
+                with st.spinner("Processing..."):
+                    result, msg, error = process_files(uploaded)
+                    if error:
+                        st.session_state.messages.append({"role":"assistant","content":error})
+                    elif result:
+                        st.session_state.result = result
+                        st.session_state.messages.append({"role":"assistant","content":msg})
+                    else:
+                        st.session_state.messages.append({"role":"assistant","content":msg})
+            st.rerun()
