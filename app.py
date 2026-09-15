@@ -175,8 +175,12 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # ── Find basement/additional floors from wall clusters ────────────────────
-    if xref_name:
+    # ── Find basement using viewport X bounds (same lot only) ─────────────────
+    if xref_name and zones:
+        # Use the viewport X range to stay within the same lot
+        lot_x1 = min(z[0] for z in zones)
+        lot_x2 = max(z[1] for z in zones)
+
         wall_pts = []
         for e in msp_m:
             try:
@@ -184,16 +188,14 @@ def process_files(uploaded_files):
                    ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
                     cx=(e.dxf.start.x+e.dxf.end.x)/2
                     cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    wall_pts.append((cx,cy))
+                    # Only walls within the same lot X range
+                    if lot_x1<=cx<=lot_x2:
+                        wall_pts.append(cy)
             except: pass
 
         if wall_pts:
-            xs = sorted(x for x,y in wall_pts)
-            med_x = xs[len(xs)//2]
-            lx1,lx2 = med_x-1500, med_x+1500
-            ys = [y for x,y in wall_pts if lx1<=x<=lx2]
             bands = {}
-            for y in ys:
+            for y in wall_pts:
                 b=round(y/500)*500
                 bands[b]=bands.get(b,0)+1
             sb = sorted(bands.keys())
@@ -209,7 +211,7 @@ def process_files(uploaded_files):
                 y1,y2=min(cluster)-300,max(cluster)+300
                 cy=(y1+y2)/2
                 if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
-                    zones.append((lx1,lx2,y1,y2))
+                    zones.append((lot_x1,lot_x2,y1,y2))
 
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
