@@ -21,7 +21,7 @@ st.markdown("""
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 if not st.session_state.get("authenticated"):
     st.markdown("<br><br><br>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 1, 1])
+    col1, col2, col3 = st.columns([1,1,1])
     with col2:
         st.markdown("### NEC Placer")
         pw = st.text_input("Password", type="password",
@@ -37,34 +37,22 @@ if not st.session_state.get("authenticated"):
 # ── DWG CONVERSION ────────────────────────────────────────────────────────────
 def dwg_to_dxf(dwg_path: Path) -> Path:
     try:
-        orig_dir = os.getcwd()
+        orig = os.getcwd()
         os.chdir(dwg_path.parent)
         subprocess.run(["dwg2dxf", dwg_path.name],
                        capture_output=True, timeout=60)
-        os.chdir(orig_dir)
-        dxf_path = dwg_path.with_suffix(".dxf")
-        if dxf_path.exists():
-            return dxf_path
-        alt = Path(orig_dir) / dwg_path.with_suffix(".dxf").name
-        if alt.exists():
-            return alt
+        os.chdir(orig)
+        out = dwg_path.with_suffix(".dxf")
+        if out.exists():
+            return out
     except: pass
     return None
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-MAX_ENTITIES = 80000
-
-SKIP = {"EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
+# ── SAME CONFIG AS WORKING extract.py ─────────────────────────────────────────
+SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
-        "north","SITE","TABLE","TABLEDATA","TABLELN",
-        "AP-FLOOR LIMIT","AP-ROOF OVERHANG","AP-CONCRETE PAD",
-        "AP-CURB","AP-CONCRETE BENCH","EXIST-WATER-METER",
-        "EXIST-MANHOLE","LG","AP-EXISTING GRAGE LINE",
-        "AP-HATCH GLASS","A-HATCH EARTH","AP-STONE HATCH",
-        "AP-SOLID","AP-DIM","TXT-2","TXT-3","TXT-4","NORTE",
-        "HIDDEN","CENTER","SECTTAG","TABLELN","AP-4","AP-3",
-        "AP-2","AP-1","AP-5","AP-6","AP-8"}
+        "north","SITE","TABLE","TABLEDATA","TABLELN"]
 
 SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
@@ -83,27 +71,20 @@ def sheet_score(name):
     if any(k in n for k in ["site","rcp","roof","ceiling"]): return 0
     return 1
 
-def is_crossing_line(x1,y1,x2,y2):
-    length = math.hypot(x2-x1,y2-y1)
-    if length < 1000: return False
-    dx,dy = abs(x2-x1),abs(y2-y1)
-    return dx<50 or dy<50
-
 def process_files(uploaded_files):
     tmp = Path(tempfile.mkdtemp())
     dxf_paths = []
     conversion_errors = []
 
     for f in uploaded_files:
-        raw = f.read()
         p = tmp / f.name
-        p.write_bytes(raw)
+        p.write_bytes(f.read())
         if f.name.lower().endswith(".dwg"):
             st.write(f"Converting {f.name}...")
             converted = dwg_to_dxf(p)
             if converted:
                 dxf_paths.append(converted)
-                st.write(f"✓ Converted")
+                st.write(f"✓ Done")
             else:
                 conversion_errors.append(f.name)
         else:
@@ -114,28 +95,35 @@ def process_files(uploaded_files):
     if not dxf_paths:
         return None, None, "No readable files found."
 
+    # Analyze files — same logic as working extract.py
     file_info = []
     for p in dxf_paths:
         try:
             doc = ezdxf.readfile(str(p))
-            has_vp = any(e.dxftype()=="VIEWPORT"
-                         for layout in doc.layouts if layout.name!="Model"
-                         for e in layout)
+            has_vp = any(
+                e.dxftype()=="VIEWPORT"
+                for layout in doc.layouts if layout.name!="Model"
+                for e in layout
+            )
             walls = sum(1 for e in doc.modelspace()
                         if e.dxftype()=="LINE" and
                         getattr(e.dxf,'layer','') in
-                        ["AP-WALL","AR-WALLS","A-WALL","WALL","Walls"])
-            file_info.append((p,doc,has_vp,walls))
+                        ["AP-WALL","AR-WALLS","A-WALL","WALL","A-WALL-FULL","Walls"])
+            texts = sum(1 for e in doc.modelspace()
+                        if e.dxftype() in ["TEXT","MTEXT"])
+            file_info.append((p,doc,has_vp,walls,texts))
         except: pass
 
     if not file_info:
         return None, None, "Could not read any files."
 
-    candidates = [(f,d,w) for f,d,vp,w in file_info if vp]
+    # Pick sheet
+    candidates = [(f,d,w,t) for f,d,vp,w,t in file_info if vp]
     if not candidates:
-        candidates = [(f,d,w) for f,d,vp,w in file_info]
-    sheet_path, doc_a1, _ = max(candidates, key=lambda x: sheet_score(x[0].name))
+        candidates = [(f,d,w,t) for f,d,vp,w,t in file_info]
+    sheet_file,doc_a1,_,_ = max(candidates, key=lambda x: sheet_score(x[0].name))
 
+    # Detect xref
     dxf_stems = {p.stem.lower() for p in dxf_paths}
     xref_name = None
     xref_ix = xref_iy = 0.0
@@ -147,18 +135,18 @@ def process_files(uploaded_files):
             if e.dxftype()=="INSERT" and e.dxf.name not in SKIP_BLOCKS:
                 if e.dxf.name.lower() in dxf_stems:
                     xref_name = e.dxf.name
-                    xref_ix = e.dxf.insert.x
-                    xref_iy = e.dxf.insert.y
-                    xref_sx = getattr(e.dxf,'xscale',1.0)
-                    xref_sy = getattr(e.dxf,'yscale',1.0)
-                    xref_rot = math.radians(getattr(e.dxf,'rotation',0.0))
+                    xref_ix   = e.dxf.insert.x
+                    xref_iy   = e.dxf.insert.y
+                    xref_sx   = getattr(e.dxf,'xscale',1.0)
+                    xref_sy   = getattr(e.dxf,'yscale',1.0)
+                    xref_rot  = math.radians(getattr(e.dxf,'rotation',0.0))
                     break
         except: pass
 
     if xref_name:
-        master_path = next((p for p in dxf_paths
-                            if p.stem.lower()==xref_name.lower()), None)
-        doc_m = next((d for p,d,_,_ in file_info if p==master_path), doc_a1)
+        master_dxf = next((p for p,_,_,_,_ in file_info
+                           if p.stem.lower()==xref_name.lower()), None)
+        doc_m = next((d for p,d,_,_,_ in file_info if p==master_dxf), doc_a1)
     else:
         doc_m = doc_a1
 
@@ -170,19 +158,22 @@ def process_files(uploaded_files):
         ux=dx*cr-dy*sr; uy=dx*sr+dy*cr
         return ux/xref_sx, uy/xref_sy
 
-    # ── Viewport zones ────────────────────────────────────────────────────────
+    # Read viewports — same as working extract.py
     zones = []
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
         for e in layout:
             try:
                 if e.dxftype()=="VIEWPORT":
-                    vcp = getattr(e.dxf,'view_center_point',None)
-                    vh  = getattr(e.dxf,'view_height',None)
+                    vcp  = getattr(e.dxf,'view_center_point',None)
+                    vh   = getattr(e.dxf,'view_height',None)
                     ps_w = getattr(e.dxf,'width',None)
                     ps_h = getattr(e.dxf,'height',None)
                     if vcp and vh and vh>0:
-                        mx,my = a1_to_master(vcp.x,vcp.y) if xref_name else (vcp.x,vcp.y)
+                        if xref_name:
+                            mx,my = a1_to_master(vcp.x,vcp.y)
+                        else:
+                            mx,my = vcp.x,vcp.y
                         half_h = vh/2
                         aspect = (ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
                         half_w = half_h*aspect
@@ -190,95 +181,50 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # ── Wall cluster zones (for floors not in viewports) ──────────────────────
-    wall_pts = []
-    for e in msp_m:
-        try:
-            if e.dxftype()=="LINE" and getattr(e.dxf,'layer','') in \
-               ["AP-WALL","AR-WALLS","A-WALL","WALL","Walls"]:
-                cx=(e.dxf.start.x+e.dxf.end.x)/2
-                cy=(e.dxf.start.y+e.dxf.end.y)/2
-                wall_pts.append((cx,cy))
-        except: pass
-
-    if wall_pts:
-        xs = sorted(x for x,y in wall_pts)
-        med_x = xs[len(xs)//2]
-        lot_x1 = med_x - 1500
-        lot_x2 = med_x + 1500
-        ys_in_lot = [y for x,y in wall_pts if lot_x1<=x<=lot_x2]
-        if ys_in_lot:
-            bands = {}
-            for y in ys_in_lot:
-                b = round(y/500)*500
-                bands[b] = bands.get(b,0)+1
-            sorted_b = sorted(bands.keys())
-            clusters,cur = [],[sorted_b[0]]
-            for i in range(1,len(sorted_b)):
-                if sorted_b[i]-sorted_b[i-1]<=1000: cur.append(sorted_b[i])
-                else: clusters.append(cur); cur=[sorted_b[i]]
-            clusters.append(cur)
-            for count,cluster in sorted([(sum(bands.get(b,0) for b in c),c)
-                                          for c in clusters],reverse=True)[:4]:
-                if count < 20: continue
-                y1,y2 = min(cluster)-300, max(cluster)+300
-                if not any(Z1<=(y1+y2)/2<=Z2 for _,_,Z1,Z2 in zones):
-                    zones.append((lot_x1,lot_x2,y1,y2))
-
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # ── Extract ───────────────────────────────────────────────────────────────
-    out = ezdxf.new("R2018")
+    # Extract geometry — exact same as working extract.py
+    out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
-    entity_count = [0]
-    visited_blocks = set()
+    copied  = 0
 
     def explode(blk_name, ix, iy, sx, sy, rot, depth=0):
-        if depth>3 or entity_count[0]>MAX_ENTITIES: return
-        if blk_name in visited_blocks: return
-        if depth==0: visited_blocks.add(blk_name)
+        if depth>5: return
         if blk_name not in doc_m.blocks: return
-        cr,sr=math.cos(rot),math.sin(rot)
+        cr,sr = math.cos(rot),math.sin(rot)
         def xf(px,py):
             lx,ly=px*sx,py*sy
             return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
         for be in doc_m.blocks[blk_name]:
-            if entity_count[0]>MAX_ENTITIES: break
             try:
-                bl=getattr(be.dxf,'layer','0')
+                bl = getattr(be.dxf,'layer','0')
                 if bl in SKIP: continue
-                bt=be.dxftype()
+                bt = be.dxftype()
                 if bt=="LINE":
-                    p1=xf(be.dxf.start.x,be.dxf.start.y)
-                    p2=xf(be.dxf.end.x,be.dxf.end.y)
-                    if not is_crossing_line(p1[0],p1[1],p2[0],p2[1]):
-                        out_msp.add_line(p1,p2,dxfattribs={"layer":bl,"color":8})
-                        entity_count[0]+=1
+                    out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
+                        xf(be.dxf.end.x,be.dxf.end.y),
+                        dxfattribs={"layer":bl,"color":8})
                 elif bt=="LWPOLYLINE":
                     pts=list(be.get_points())
                     if pts:
                         out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
                             dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
-                        entity_count[0]+=1
                 elif bt=="ARC":
                     nc=xf(be.dxf.center.x,be.dxf.center.y)
                     out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
                         start_angle=be.dxf.start_angle+math.degrees(rot),
                         end_angle=be.dxf.end_angle+math.degrees(rot),
                         dxfattribs={"layer":bl,"color":8})
-                    entity_count[0]+=1
                 elif bt=="CIRCLE":
                     nc=xf(be.dxf.center.x,be.dxf.center.y)
                     out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
                         dxfattribs={"layer":bl,"color":8})
-                    entity_count[0]+=1
                 elif bt=="SPLINE":
                     spts=list(be.control_points)
                     if spts:
                         out_msp.add_lwpolyline([xf(p[0],p[1]) for p in spts],
                             dxfattribs={"layer":bl,"color":8})
-                        entity_count[0]+=1
                 elif bt=="INSERT":
                     nix,niy=xf(be.dxf.insert.x,be.dxf.insert.y)
                     explode(be.dxf.name,nix,niy,
@@ -288,7 +234,6 @@ def process_files(uploaded_files):
             except: pass
 
     for e in msp_m:
-        if entity_count[0]>MAX_ENTITIES: break
         try:
             layer=getattr(e.dxf,'layer','0')
             if layer in SKIP: continue
@@ -299,12 +244,10 @@ def process_files(uploaded_files):
                     cx=(e.dxf.start.x+e.dxf.end.x)/2
                     cy=(e.dxf.start.y+e.dxf.end.y)/2
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        x1,y1_=e.dxf.start.x,e.dxf.start.y
-                        x2,y2_=e.dxf.end.x,e.dxf.end.y
-                        if not is_crossing_line(x1,y1_,x2,y2_):
-                            out_msp.add_line((x1,y1_),(x2,y2_),
-                                dxfattribs={"layer":layer,"color":8})
-                            entity_count[0]+=1
+                        out_msp.add_line(
+                            (e.dxf.start.x,e.dxf.start.y),
+                            (e.dxf.end.x,e.dxf.end.y),
+                            dxfattribs={"layer":layer,"color":8})
                         placed=True
                 elif t=="LWPOLYLINE":
                     pts=list(e.get_points())
@@ -313,23 +256,22 @@ def process_files(uploaded_files):
                         cy=sum(p[1] for p in pts)/len(pts)
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
-                                dxfattribs={"layer":layer,"color":8,"closed":e.is_closed})
-                            entity_count[0]+=1
+                                dxfattribs={"layer":layer,"color":8,
+                                            "closed":e.is_closed})
                             placed=True
                 elif t=="ARC":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_arc(center=(cx,cy),radius=e.dxf.radius,
-                            start_angle=e.dxf.start_angle,end_angle=e.dxf.end_angle,
+                            start_angle=e.dxf.start_angle,
+                            end_angle=e.dxf.end_angle,
                             dxfattribs={"layer":layer,"color":8})
-                        entity_count[0]+=1
                         placed=True
                 elif t=="CIRCLE":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_circle(center=(cx,cy),radius=e.dxf.radius,
                             dxfattribs={"layer":layer,"color":8})
-                        entity_count[0]+=1
                         placed=True
                 elif t=="SPLINE":
                     pts=list(e.control_points)
@@ -339,21 +281,21 @@ def process_files(uploaded_files):
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
                                 dxfattribs={"layer":layer,"color":8})
-                            entity_count[0]+=1
                             placed=True
                 elif t=="INSERT":
                     cx,cy=e.dxf.insert.x,e.dxf.insert.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        visited_blocks.clear()
                         explode(e.dxf.name,cx,cy,
                             getattr(e.dxf,'xscale',1.0),
                             getattr(e.dxf,'yscale',1.0),
                             math.radians(getattr(e.dxf,'rotation',0.0)))
                         placed=True
-                if placed: break
+                if placed:
+                    copied+=1
+                    break
         except: pass
 
-    # ── Labels ────────────────────────────────────────────────────────────────
+    # Labels — exact same as working extract.py
     placed_labels=0
     for e in doc_a1.modelspace():
         try:
@@ -386,7 +328,7 @@ def process_files(uploaded_files):
 
     out_path = tmp / "floor_plan_clean.dxf"
     out.saveas(str(out_path))
-    return out_path.read_bytes(), f"Done. {entity_count[0]} entities, {placed_labels} labels.", None
+    return out_path.read_bytes(), f"Done. {copied} entities, {placed_labels} labels.", None
 
 # ── CHAT UI ───────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
