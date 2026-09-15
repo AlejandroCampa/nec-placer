@@ -23,8 +23,8 @@ if not st.session_state.get("authenticated"):
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         st.markdown("### NEC Placer")
-        pw = st.text_input("Password", type="password", label_visibility="collapsed",
-                           placeholder="Password")
+        pw = st.text_input("Password", type="password",
+                           label_visibility="collapsed", placeholder="Password")
         if st.button("Continue", use_container_width=True):
             if pw == st.secrets.get("password", "necplacer2025"):
                 st.session_state.authenticated = True
@@ -33,7 +33,22 @@ if not st.session_state.get("authenticated"):
                 st.error("Incorrect password")
     st.stop()
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
+# ── DWG CONVERSION ────────────────────────────────────────────────────────────
+def dwg_to_dxf(dwg_path: Path) -> Path:
+    """Convert DWG to DXF using libredwg (free, installed via packages.txt)"""
+    try:
+        result = subprocess.run(
+            ["dwg2dxf", str(dwg_path)],
+            capture_output=True, timeout=60
+        )
+        dxf_path = dwg_path.with_suffix(".dxf")
+        if dxf_path.exists():
+            return dxf_path
+    except Exception as ex:
+        pass
+    return None
+
+# ── EXTRACT LOGIC ─────────────────────────────────────────────────────────────
 SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
@@ -56,57 +71,18 @@ def sheet_score(name):
     if any(k in n for k in ["site","rcp","roof","ceiling"]): return 0
     return 1
 
-def dwg_to_dxf(dwg_path: Path, out_dir: Path) -> Path:
-    """Convert DWG to DXF using available tools."""
-    dxf_path = out_dir / (dwg_path.stem + ".dxf")
-
-    # Try dwg2dxf (libredwg)
-    try:
-        result = subprocess.run(
-            ["dwg2dxf", str(dwg_path), "-o", str(dxf_path)],
-            capture_output=True, timeout=30
-        )
-        if dxf_path.exists():
-            return dxf_path
-    except: pass
-
-    # Try ODA if somehow available
-    oda_paths = [
-        "/usr/bin/ODAFileConverter",
-        "/Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter",
-        r"C:\Program Files\ODA\ODAFileConverter 27.1.0\ODAFileConverter.exe"
-    ]
-    for oda in oda_paths:
-        if Path(oda).exists():
-            try:
-                tmp_in = out_dir / "oda_in"
-                tmp_out = out_dir / "oda_out"
-                tmp_in.mkdir(exist_ok=True)
-                tmp_out.mkdir(exist_ok=True)
-                import shutil
-                shutil.copy2(dwg_path, tmp_in / dwg_path.name)
-                subprocess.run([oda, str(tmp_in), str(tmp_out),
-                               "ACAD2018", "DXF", "0", "1", dwg_path.name],
-                               capture_output=True, timeout=30)
-                converted = tmp_out / (dwg_path.stem + ".dxf")
-                if converted.exists():
-                    shutil.copy2(converted, dxf_path)
-                    return dxf_path
-            except: pass
-
-    return None
-
 def process_files(uploaded_files):
     tmp = Path(tempfile.mkdtemp())
     dxf_paths = []
     conversion_errors = []
 
     for f in uploaded_files:
+        raw = f.read()
         p = tmp / f.name
-        p.write_bytes(f.read())
+        p.write_bytes(raw)
 
-        if p.suffix.lower() == ".dwg":
-            converted = dwg_to_dxf(p, tmp)
+        if f.name.lower().endswith(".dwg"):
+            converted = dwg_to_dxf(p)
             if converted:
                 dxf_paths.append(converted)
             else:
@@ -114,8 +90,8 @@ def process_files(uploaded_files):
         else:
             dxf_paths.append(p)
 
-    if conversion_errors:
-        return None, None, f"Could not convert these DWG files (no converter available on server): {', '.join(conversion_errors)}. Please convert to DXF locally first using ODA File Converter."
+    if conversion_errors and not dxf_paths:
+        return None, None, f"Could not convert DWG files: {', '.join(conversion_errors)}. Please upload DXF files instead."
 
     if not dxf_paths:
         return None, None, "No readable files found."
@@ -136,8 +112,7 @@ def process_files(uploaded_files):
             texts = sum(1 for e in doc.modelspace()
                         if e.dxftype() in ["TEXT","MTEXT"])
             file_info.append((p,doc,has_vp,walls,texts))
-        except Exception as ex:
-            pass
+        except: pass
 
     if not file_info:
         return None, None, "Could not read any files."
@@ -167,7 +142,8 @@ def process_files(uploaded_files):
         except: pass
 
     if xref_name:
-        master_path = next((p for p in dxf_paths if p.stem.lower()==xref_name.lower()), None)
+        master_path = next((p for p in dxf_paths
+                            if p.stem.lower()==xref_name.lower()), None)
         doc_m = next((d for p,d,_,_,_ in file_info if p==master_path), doc_a1)
     else:
         doc_m = doc_a1
@@ -272,13 +248,15 @@ def process_files(uploaded_files):
                         cy=sum(p[1] for p in pts)/len(pts)
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
-                                dxfattribs={"layer":layer,"color":8,"closed":e.is_closed})
+                                dxfattribs={"layer":layer,"color":8,
+                                            "closed":e.is_closed})
                             placed=True
                 elif t=="ARC":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_arc(center=(cx,cy),radius=e.dxf.radius,
-                            start_angle=e.dxf.start_angle,end_angle=e.dxf.end_angle,
+                            start_angle=e.dxf.start_angle,
+                            end_angle=e.dxf.end_angle,
                             dxfattribs={"layer":layer,"color":8})
                         placed=True
                 elif t=="CIRCLE":
@@ -333,7 +311,8 @@ def process_files(uploaded_files):
                     if X1<=mx<=X2 and Y1<=my<=Y2:
                         out_msp.add_text(txt[:50],dxfattribs={
                             "layer":"ROOM-LABELS","color":253,
-                            "insert":(mx,my),"height":h*xref_sx,"rotation":txt_rot})
+                            "insert":(mx,my),"height":h*xref_sx,
+                            "rotation":txt_rot})
                         placed_labels+=1
                         break
         except: pass
@@ -352,7 +331,7 @@ if "result" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 
-st.markdown("<h4 style='text-align:center; padding: 20px 0 10px; color: #fff'>NEC Placer</h4>",
+st.markdown("<h4 style='text-align:center; padding: 20px 0 10px;'>NEC Placer</h4>",
             unsafe_allow_html=True)
 
 for msg in st.session_state.messages:
@@ -369,8 +348,8 @@ if st.session_state.result:
         )
 
 uploaded = st.file_uploader(
-    "Upload DWG or DXF files",
-    type=["dxf", "dwg"],
+    "Upload files",
+    type=["dxf","dwg"],
     accept_multiple_files=True,
     label_visibility="collapsed"
 )
@@ -380,18 +359,15 @@ if uploaded:
     if file_key not in st.session_state.processed_files:
         st.session_state.processed_files.add(file_key)
         names = ", ".join(f.name for f in uploaded)
-        st.session_state.messages.append({
-            "role": "user",
-            "content": f"Uploaded: {names}"
-        })
+        st.session_state.messages.append({"role":"user","content":f"Uploaded: {names}"})
         with st.chat_message("assistant"):
             with st.spinner("Processing..."):
                 result, msg, error = process_files(uploaded)
                 if error:
-                    st.session_state.messages.append({"role":"assistant","content": error})
+                    st.session_state.messages.append({"role":"assistant","content":error})
                 elif result:
                     st.session_state.result = result
-                    st.session_state.messages.append({"role":"assistant","content": msg})
+                    st.session_state.messages.append({"role":"assistant","content":msg})
                 else:
-                    st.session_state.messages.append({"role":"assistant","content": msg})
+                    st.session_state.messages.append({"role":"assistant","content":msg})
         st.rerun()
