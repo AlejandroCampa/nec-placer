@@ -153,9 +153,15 @@ def process_files(uploaded_files):
         return ux/xref_sx, uy/xref_sy
 
     # Read viewports
+       # Read viewports - DEBUG
     zones = []
+    st.write("=== DEBUG ===")
+    st.write(f"xref_name: {xref_name}")
+    st.write(f"xref_ix: {xref_ix:.1f}, xref_iy: {xref_iy:.1f}")
+    
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
+        st.write(f"Layout: {layout.name}")
         for e in layout:
             try:
                 if e.dxftype()=="VIEWPORT":
@@ -163,6 +169,7 @@ def process_files(uploaded_files):
                     vh   = getattr(e.dxf,'view_height',None)
                     ps_w = getattr(e.dxf,'width',None)
                     ps_h = getattr(e.dxf,'height',None)
+                    st.write(f"  VP raw: center=({vcp.x:.0f},{vcp.y:.0f}) h={vh:.0f} w={ps_w:.0f} ps_h={ps_h:.0f}")
                     if vcp and vh and vh>0:
                         if xref_name:
                             mx,my = a1_to_master(vcp.x,vcp.y)
@@ -171,13 +178,17 @@ def process_files(uploaded_files):
                         half_h = vh/2
                         aspect = (ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
                         half_w = half_h*aspect
-                        if half_w<50 or half_h<50: continue
+                        st.write(f"  VP master: center=({mx:.0f},{my:.0f}) half_w={half_w:.0f} half_h={half_h:.0f}")
+                        if half_w<50 or half_h<50:
+                            st.write(f"  SKIPPED (too small)")
+                            continue
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
-            except: pass
+                        st.write(f"  ZONE: X={mx-half_w:.0f}-{mx+half_w:.0f} Y={my-half_h:.0f}-{my+half_h:.0f}")
+            except Exception as ex:
+                st.write(f"  VP error: {ex}")
 
-    if not zones:
-        zones=[(-1e9,1e9,-1e9,1e9)]
-
+    st.write(f"Total zones: {len(zones)}")
+    st.write("=== END DEBUG ===")
     # Extract geometry
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
