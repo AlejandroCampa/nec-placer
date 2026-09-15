@@ -152,7 +152,7 @@ def process_files(uploaded_files):
         ux=dx*cr-dy*sr; uy=dx*sr+dy*cr
         return ux/xref_sx, uy/xref_sy
 
-    # Read viewports
+    # ── Read viewport zones ───────────────────────────────────────────────────
     zones = []
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
@@ -175,9 +175,8 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # For xref projects: find ONE additional floor using the densest wall cluster
-    # outside the viewport zone and within the same lot X bounds
-    # Volvo (no xref) is unaffected by this block
+    # ── Find other floor using wall clusters (xref projects only) ────────────
+    # Uses "closest Y to zero" heuristic to avoid picking copies from other lots
     if xref_name and zones:
         lot_x1 = min(z[0] for z in zones)
         lot_x2 = max(z[1] for z in zones)
@@ -207,20 +206,19 @@ def process_files(uploaded_files):
                 else: clusters.append(cur); cur=[sb[i]]
             if cur: clusters.append(cur)
 
-            # Take only the single densest cluster — avoids picking up other lots
-            best = max(
-                [c for c in clusters if sum(bands.get(b,0) for b in c) >= 20],
-                key=lambda c: sum(bands.get(b,0) for b in c),
-                default=None
-            )
-            if best:
+            # Pick the cluster whose center Y is closest to zero
+            # This is always the ground floor, never a copy from another lot
+            valid = [c for c in clusters
+                     if sum(bands.get(b,0) for b in c) >= 20]
+            if valid:
+                best = min(valid, key=lambda c: abs(sum(c)/len(c)))
                 y1,y2 = min(best)-300, max(best)+300
                 zones.append((lot_x1, lot_x2, y1, y2))
 
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # Extract geometry
+    # ── Extract geometry ──────────────────────────────────────────────────────
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
     copied  = 0
@@ -331,8 +329,12 @@ def process_files(uploaded_files):
                     break
         except: pass
 
-    # Labels
+    # ── Labels ────────────────────────────────────────────────────────────────
+    # Only check Y (not X) — labels in A-1 have different X offsets from geometry
     placed_labels=0
+    all_y1 = min(z[2] for z in zones)
+    all_y2 = max(z[3] for z in zones)
+
     for e in doc_a1.modelspace():
         try:
             if e.dxftype() in ["TEXT","MTEXT"]:
@@ -352,14 +354,13 @@ def process_files(uploaded_files):
                     txt_rot=txt_rot-math.degrees(xref_rot)
                 else:
                     mx,my=ix,iy
-                for (X1,X2,Y1,Y2) in zones:
-                    if X1<=mx<=X2 and Y1<=my<=Y2:
-                        out_msp.add_text(txt[:50],dxfattribs={
-                            "layer":"ROOM-LABELS","color":253,
-                            "insert":(mx,my),"height":h*xref_sx,
-                            "rotation":txt_rot})
-                        placed_labels+=1
-                        break
+                # Only check Y range to avoid rejecting labels with X offset
+                if all_y1<=my<=all_y2:
+                    out_msp.add_text(txt[:50],dxfattribs={
+                        "layer":"ROOM-LABELS","color":253,
+                        "insert":(mx,my),"height":h*xref_sx,
+                        "rotation":txt_rot})
+                    placed_labels+=1
         except: pass
 
     out_path = tmp / "floor_plan_clean.dxf"
