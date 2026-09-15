@@ -175,7 +175,9 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # Find additional floors from wall clusters within same lot X range
+    # For xref projects: find ONE additional floor using the densest wall cluster
+    # outside the viewport zone and within the same lot X bounds
+    # Volvo (no xref) is unaffected by this block
     if xref_name and zones:
         lot_x1 = min(z[0] for z in zones)
         lot_x2 = max(z[1] for z in zones)
@@ -204,14 +206,16 @@ def process_files(uploaded_files):
                 if sb[i]-sb[i-1]<=1000: cur.append(sb[i])
                 else: clusters.append(cur); cur=[sb[i]]
             if cur: clusters.append(cur)
-            for count,cluster in sorted(
-                [(sum(bands.get(b,0) for b in c),c) for c in clusters],
-                reverse=True)[:2]:
-                if count<20: continue
-                y1,y2=min(cluster)-300,max(cluster)+300
-                cy=(y1+y2)/2
-                if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
-                    zones.append((lot_x1,lot_x2,y1,y2))
+
+            # Take only the single densest cluster — avoids picking up other lots
+            best = max(
+                [c for c in clusters if sum(bands.get(b,0) for b in c) >= 20],
+                key=lambda c: sum(bands.get(b,0) for b in c),
+                default=None
+            )
+            if best:
+                y1,y2 = min(best)-300, max(best)+300
+                zones.append((lot_x1, lot_x2, y1, y2))
 
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
