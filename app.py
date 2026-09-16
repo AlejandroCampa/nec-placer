@@ -175,8 +175,9 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # ── Find other floor using wall clusters (xref projects only) ────────────
-    # Uses "closest Y to zero" heuristic to avoid picking copies from other lots
+    # ── Find ground floor via wall clusters (xref projects only) ─────────────
+    # Only look at NEGATIVE Y clusters → excludes positive-Y lot copies
+    # Pick the HIGHEST center Y → that's the ground floor (above basement)
     if xref_name and zones:
         lot_x1 = min(z[0] for z in zones)
         lot_x2 = max(z[1] for z in zones)
@@ -190,7 +191,9 @@ def process_files(uploaded_files):
                    ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
                     cx=(e.dxf.start.x+e.dxf.end.x)/2
                     cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    if lot_x1<=cx<=lot_x2 and not (covered_y1<=cy<=covered_y2):
+                    # Only NEGATIVE Y, within lot X, outside viewport zone
+                    if lot_x1<=cx<=lot_x2 and cy<0 and \
+                       not (covered_y1<=cy<=covered_y2):
                         wall_ys.append(cy)
             except: pass
 
@@ -206,12 +209,12 @@ def process_files(uploaded_files):
                 else: clusters.append(cur); cur=[sb[i]]
             if cur: clusters.append(cur)
 
-            # Pick the cluster whose center Y is closest to zero
-            # This is always the ground floor, never a copy from another lot
+            # Pick cluster with HIGHEST center Y (ground floor, above basement)
             valid = [c for c in clusters
-                     if sum(bands.get(b,0) for b in c) >= 20]
+                     if sum(bands.get(b,0) for b in c) >= 20
+                     and sum(c)/len(c) < 0]  # Must be negative Y
             if valid:
-                best = min(valid, key=lambda c: abs(sum(c)/len(c)))
+                best = max(valid, key=lambda c: sum(c)/len(c))
                 y1,y2 = min(best)-300, max(best)+300
                 zones.append((lot_x1, lot_x2, y1, y2))
 
@@ -330,38 +333,71 @@ def process_files(uploaded_files):
         except: pass
 
     # ── Labels ────────────────────────────────────────────────────────────────
-    # Only check Y (not X) — labels in A-1 have different X offsets from geometry
-    placed_labels=0
-    all_y1 = min(z[2] for z in zones)
-    all_y2 = max(z[3] for z in zones)
+    placed_labels = 0
 
-    for e in doc_a1.modelspace():
-        try:
-            if e.dxftype() in ["TEXT","MTEXT"]:
-                if e.dxftype()=="TEXT":
-                    txt=e.dxf.text.strip()
-                    ix,iy=e.dxf.insert.x,e.dxf.insert.y
-                    txt_rot=getattr(e.dxf,'rotation',0.0)
-                    h=e.dxf.height
-                else:
-                    txt=clean_mtext(e.text)
-                    ix,iy=e.dxf.insert.x,e.dxf.insert.y
-                    txt_rot=getattr(e.dxf,'rotation',0.0)
-                    h=getattr(e.dxf,'char_height',20)
-                if len(txt)<2: continue
-                if xref_name:
-                    mx,my=a1_to_master(ix,iy)
-                    txt_rot=txt_rot-math.degrees(xref_rot)
-                else:
-                    mx,my=ix,iy
-                # Only check Y range to avoid rejecting labels with X offset
-                if all_y1<=my<=all_y2:
-                    out_msp.add_text(txt[:50],dxfattribs={
-                        "layer":"ROOM-LABELS","color":253,
-                        "insert":(mx,my),"height":h*xref_sx,
-                        "rotation":txt_rot})
-                    placed_labels+=1
-        except: pass
+    if not xref_name:
+        # Non-xref projects (Revit/Volvo): labels work perfectly as-is
+        for e in doc_a1.modelspace():
+            try:
+                if e.dxftype() in ["TEXT","MTEXT"]:
+                    if e.dxftype()=="TEXT":
+                        txt=e.dxf.text.strip(); ix,iy=e.dxf.insert.x,e.dxf.insert.y
+                        txt_rot=getattr(e.dxf,'rotation',0.0); h=e.dxf.height
+                    else:
+                        txt=clean_mtext(e.text); ix,iy=e.dxf.insert.x,e.dxf.insert.y
+                        txt_rot=getattr(e.dxf,'rotation',0.0)
+                        h=getattr(e.dxf,'char_height',20)
+                    if len(txt)<2: continue
+                    mx,my = ix,iy
+                    for (X1,X2,Y1,Y2) in zones:
+                        if X1<=mx<=X2 and Y1<=my<=Y2:
+                            out_msp.add_text(txt[:50],dxfattribs={
+                                "layer":"ROOM-LABELS","color":253,
+                                "insert":(mx,my),"height":h,
+                                "rotation":txt_rot})
+                            placed_labels+=1
+                            break
+            except: pass
+    else:
+        # Xref projects: labels have X offset — correct it using zone center
+        # Step 1: find ground floor zone (highest Y = least negative)
+        ground_zone = max(zones, key=lambda z: (z[2]+z[3])/2)
+        gx1,gx2,gy1,gy2 = ground_zone
+        zone_x_center = (gx1+gx2)/2
+
+        # Step 2: transform all A-1 labels and find their average X
+        transformed_labels = []
+        for e in doc_a1.modelspace():
+            try:
+                if e.dxftype() in ["TEXT","MTEXT"]:
+                    if e.dxftype()=="TEXT":
+                        txt=e.dxf.text.strip(); ix,iy=e.dxf.insert.x,e.dxf.insert.y
+                        txt_rot=getattr(e.dxf,'rotation',0.0); h=e.dxf.height
+                    else:
+                        txt=clean_mtext(e.text); ix,iy=e.dxf.insert.x,e.dxf.insert.y
+                        txt_rot=getattr(e.dxf,'rotation',0.0)
+                        h=getattr(e.dxf,'char_height',20)
+                    if len(txt)<2: continue
+                    mx,my = a1_to_master(ix,iy)
+                    txt_rot = txt_rot - math.degrees(xref_rot)
+                    # Only keep labels that fall in ground floor Y range
+                    if gy1<=my<=gy2:
+                        transformed_labels.append((mx,my,txt,h*xref_sx,txt_rot))
+            except: pass
+
+        # Step 3: compute X correction
+        x_correction = 0
+        if transformed_labels:
+            avg_x = sum(mx for mx,my,t,h,r in transformed_labels) / len(transformed_labels)
+            x_correction = zone_x_center - avg_x
+
+        # Step 4: place labels with X correction
+        for mx,my,txt,h,txt_rot in transformed_labels:
+            out_msp.add_text(txt[:50],dxfattribs={
+                "layer":"ROOM-LABELS","color":253,
+                "insert":(mx+x_correction, my),
+                "height":h,"rotation":txt_rot})
+            placed_labels+=1
 
     out_path = tmp / "floor_plan_clean.dxf"
     out.saveas(str(out_path))
