@@ -477,8 +477,8 @@ def process_files(uploaded_files):
                 for e in msp_rcp:
                     try: rcp_layers.add(getattr(e.dxf,'layer','0'))
                     except: pass
-                for bn in doc_rcp.blocks:
-                    for be in doc_rcp.blocks[bn]:
+                for block in doc_rcp.blocks:
+                    for be in block:
                         try: rcp_layers.add(getattr(be.dxf,'layer','0'))
                         except: pass
                 st.write("RCP layers found:")
