@@ -480,15 +480,17 @@ def process_files(uploaded_files):
                     xc=zone_x_center-cx
                     for ix,iy,txt,h,txt_rot in cluster:
                         tl.append((ix+xc,iy,txt,h,txt_rot))
-        # Compute xc from xref transform geometry, not from noisy avg_x
-        # a1_to_master(0,0) gives us where A-1 origin sits in Master coords
-        # shift that to zone_x_center to align labels
-        origin_mx=a1_to_master(0,0)[0]
-        xc=zone_x_center-origin_mx
-        zone_y1=min(z[2] for z in zones)-500
-        zone_y2=max(z[3] for z in zones)+500
-        for mx,my,txt,h,txt_rot in tl:
-            if zone_y1<=my<=zone_y2:
+        # Per-zone X correction: compute avg_x from labels in each zone Y range
+        # then shift that avg to zone center — works for both ground floor and basement
+        for (X1,X2,Y1,Y2) in zones:
+            zone_cx=(X1+X2)/2
+            zone_buf=300
+            zone_lbls=[(mx,my,t,h,r) for mx,my,t,h,r in tl
+                       if (Y1-zone_buf)<=my<=(Y2+zone_buf)]
+            if not zone_lbls: continue
+            avg_mx=sum(mx for mx,my,t,h,r in zone_lbls)/len(zone_lbls)
+            xc=zone_cx-avg_mx
+            for mx,my,txt,h,txt_rot in zone_lbls:
                 out_msp.add_text(txt[:50],dxfattribs={
                     "layer":"ROOM-LABELS","color":253,
                     "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
