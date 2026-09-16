@@ -143,6 +143,16 @@ def process_files(uploaded_files):
                     xref_rot=math.radians(getattr(e.dxf,'rotation',0.0))
                     break
         except: pass
+    if xref_name:
+        st.write(f"DEBUG xref: name={xref_name} ix={xref_ix:.1f} iy={xref_iy:.1f} sx={xref_sx:.4f} rot={math.degrees(xref_rot):.2f}")
+        # Show first few label transforms
+        for e in doc_a1.modelspace():
+            try:
+                if e.dxftype()=="TEXT" and len(e.dxf.text.strip())>1:
+                    mx,my=a1_to_master(e.dxf.insert.x,e.dxf.insert.y)
+                    st.write(f"DEBUG label: '{e.dxf.text.strip()[:15]}' a1=({e.dxf.insert.x:.0f},{e.dxf.insert.y:.0f}) -> master=({mx:.0f},{my:.0f})")
+                    break
+            except: pass
 
     def a1_to_master(ax,ay):
         dx=ax-xref_ix; dy=ay-xref_iy
