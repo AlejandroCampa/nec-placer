@@ -20,10 +20,8 @@ RUN which dwg2dxf && echo "dwg2dxf OK"
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-
 RUN mkdir -p /app/.streamlit && \
     printf '[server]\nmaxUploadSize = 500\nmaxMessageSize = 500\n' > /app/.streamlit/config.toml
-
 COPY app.py .
 EXPOSE 8501
 CMD ["streamlit", "run", "app.py", \
