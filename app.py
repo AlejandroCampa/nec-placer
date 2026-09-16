@@ -69,7 +69,14 @@ def is_rcp(name):
     n = name.lower()
     return any(k in n for k in ["rcp","reflected ceiling","ceiling plan","a103"])
 
+CEIL_LAYER_KW=("CLNG","CEIL","LITE","LIGHT","LAMP","LUM","PLAF","CIELO",
+               "LUZ","LUCES","ILUMIN")
+CEIL_BLOCK_KW=("LIGHT","LITE","LAMP","LUM","FIXT","DOWNL","RECESS","TROFFER",
+               "LUZ","ILUMIN")
+RCP_TEXT_KW=("REFLECTED","CEILING PLAN","RCP","PLAFON","PLAFÓN","CIELO RASO")
+
 def quick_scan(p):
+    """Cheap per-file scan. Returns (has_vp, walls, xref, ceil, total, rcp_txt)."""
     try:
         doc = ezdxf.readfile(str(p))
         has_vp = any(e.dxftype()=="VIEWPORT"
@@ -81,10 +88,38 @@ def quick_scan(p):
                     ["AP-WALL","AR-WALLS","A-WALL","WALL","A-WALL-FULL","Walls"])
         xref = next((e.dxf.name for e in doc.modelspace()
                      if e.dxftype()=="INSERT" and e.dxf.name not in SKIP_BLOCKS), None)
+        # Ceiling evidence: entities on ceiling/lighting layers or light blocks,
+        # counted across modelspace + block definitions.
+        ceil=0; total=0
+        def tally(ent):
+            nonlocal ceil,total
+            try:
+                total+=1
+                lay=getattr(ent.dxf,'layer','').upper()
+                if any(k in lay for k in CEIL_LAYER_KW): ceil+=1
+                elif ent.dxftype()=="INSERT" and \
+                     any(k in ent.dxf.name.upper() for k in CEIL_BLOCK_KW): ceil+=1
+            except: pass
+        for e in doc.modelspace(): tally(e)
+        for blk in doc.blocks:
+            if blk.name.startswith("*"): continue
+            for e in blk: tally(e)
+        # Sheet title / notes mentioning a ceiling plan (any layout)
+        rcp_txt=False
+        for layout in doc.layouts:
+            for e in layout:
+                try:
+                    if e.dxftype()=="TEXT": s=e.dxf.text
+                    elif e.dxftype()=="MTEXT": s=e.text
+                    else: continue
+                    if any(k in s.upper() for k in RCP_TEXT_KW):
+                        rcp_txt=True; break
+                except: pass
+            if rcp_txt: break
         del doc
-        return has_vp, walls, xref
+        return has_vp, walls, xref, ceil, total, rcp_txt
     except:
-        return False, 0, None
+        return False, 0, None, 0, 0, False
 
 def process_files(uploaded_files):
     tmp = Path(tempfile.mkdtemp())
@@ -117,17 +152,16 @@ def process_files(uploaded_files):
 
     file_meta = []
     for p in floor_paths:
-        has_vp, walls, xref = quick_scan(p)
-        file_meta.append((p, has_vp, walls, xref))
+        file_meta.append((p,) + quick_scan(p))
     gc.collect()
 
     if not file_meta:
         return None, None, "Could not read any files."
 
-    candidates = [(p,vp,w) for p,vp,w,_ in file_meta if vp]
+    candidates = [m for m in file_meta if m[1]]
     if not candidates:
-        candidates = [(p,vp,w) for p,vp,w,_ in file_meta]
-    sheet_path = max(candidates, key=lambda x: sheet_score(x[0].name))[0]
+        candidates = list(file_meta)
+    sheet_path = max(candidates, key=lambda m: sheet_score(m[0].name))[0]
 
     doc_a1 = ezdxf.readfile(str(sheet_path))
 
@@ -177,7 +211,21 @@ def process_files(uploaded_files):
         master_path=next((p for p in dxf_paths if p.stem.lower()==xref_name.lower()),None)
         doc_m=ezdxf.readfile(str(master_path)) if master_path else doc_a1
     else:
+        master_path=None
         doc_m=doc_a1
+
+    # Content-based RCP detection: a non-sheet, non-master file whose ceiling
+    # evidence clearly beats the sheet's, or whose title calls it a ceiling plan.
+    sheet_meta=next((m for m in file_meta if m[0]==sheet_path),None)
+    sheet_ratio=(sheet_meta[4]/sheet_meta[5]) if (sheet_meta and sheet_meta[5]) else 0.0
+    for (p,vp,w,x,ceil,total,rtxt) in file_meta:
+        if p==sheet_path or p==master_path or p in rcp_paths: continue
+        if sheet_score(p.name)==0: continue   # site/roof sheets are never RCP
+        ratio=(ceil/total) if total else 0.0
+        by_layers = ceil>=20 and ratio>=0.10 and ratio>=2*sheet_ratio
+        by_title  = rtxt and ceil>=10 and ratio>=0.03
+        if by_layers or by_title:
+            rcp_paths.append(p)
 
     msp_m=doc_m.modelspace()
 
@@ -512,9 +560,33 @@ def process_files(uploaded_files):
     # Grid lines + bubbles: never fixture geometry, drop at leaf level
     # even inside ceiling blocks. INSERTs are still always traversed.
     RCP_GRID={"S-GRID","S-GRID-IDEN"}
-    def is_ceiling_layer(n): return n not in RCP_SKIP_LAYERS and n not in RCP_GRID
+    RCP_SKIP_SUB=("WALL","MURO","PARED","DOOR","PUERTA","WINDOW","VENTANA",
+                  "FURN","MUEBLE","PISO","FLOOR","STAIR","ESCAL","CASEWORK",
+                  "PLUMB","SANIT")
+    def is_ceiling_layer(n):
+        if n in RCP_SKIP_LAYERS or n in RCP_GRID: return False
+        u=n.upper()
+        if any(k in u for k in CEIL_LAYER_KW): return True   # always keep lights
+        if any(k in u for k in RCP_SKIP_SUB): return False
+        return True
     floor_cx=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
     rcp_count=0
+    rcp_names=[]
+
+    # Floor-plan fingerprint for mirror detection: midpoints of everything
+    # already drawn, snapped to a coarse grid.
+    MG=50
+    floor_keys=set()
+    for e in out_msp:
+        try:
+            if e.dxftype()=="LINE":
+                floor_keys.add((round((e.dxf.start.x+e.dxf.end.x)/2/MG),
+                                round((e.dxf.start.y+e.dxf.end.y)/2/MG)))
+            elif e.dxftype()=="LWPOLYLINE":
+                pts=list(e.get_points())
+                for a,b in zip(pts,pts[1:]):
+                    floor_keys.add((round((a[0]+b[0])/2/MG),round((a[1]+b[1])/2/MG)))
+        except: pass
 
     for rcp_path in rcp_paths:
         try:
@@ -539,7 +611,48 @@ def process_files(uploaded_files):
                                 rcp_zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
                     except: pass
             if not rcp_zones:
-                del doc_rcp; continue
+                # Model-only RCP file: assume same coordinate space as the plan
+                rcp_zones=list(zones)
+
+            # Decide mirror vs aligned: which orientation lands more of the
+            # RCP's geometry on top of floor-plan geometry? Mirror stays the
+            # default unless "aligned" wins decisively.
+            def _rcp_midpoints(limit=20000):
+                out=[]
+                def walk(ents,ix,iy,sx,sy,rot,d):
+                    if d>2 or len(out)>=limit: return
+                    cr,sr=math.cos(rot),math.sin(rot)
+                    def xf(px,py):
+                        lx,ly=px*sx,py*sy
+                        return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
+                    for be in ents:
+                        if len(out)>=limit: return
+                        try:
+                            bt=be.dxftype()
+                            if bt=="LINE":
+                                p1=xf(be.dxf.start.x,be.dxf.start.y); p2=xf(be.dxf.end.x,be.dxf.end.y)
+                                out.append(((p1[0]+p2[0])/2,(p1[1]+p2[1])/2))
+                            elif bt=="LWPOLYLINE":
+                                pts=[xf(p[0],p[1]) for p in be.get_points()]
+                                for a,b in zip(pts,pts[1:]): out.append(((a[0]+b[0])/2,(a[1]+b[1])/2))
+                            elif bt=="INSERT" and be.dxf.name in doc_rcp.blocks:
+                                ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
+                                walk(doc_rcp.blocks[be.dxf.name],ni,nj,
+                                     sx*getattr(be.dxf,'xscale',1.0),sy*getattr(be.dxf,'yscale',1.0),
+                                     rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
+                        except: pass
+                walk(msp_rcp,0,0,1,1,0,0)
+                return out
+            _mids=_rcp_midpoints()
+            _in=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in rcp_zones)
+            _mids=[(x,y) for x,y in _mids if _in(x,y)]
+            score_mirror=sum((round((2*floor_cx-x)/MG),round(y/MG)) in floor_keys for x,y in _mids)
+            score_align =sum((round(x/MG),round(y/MG)) in floor_keys for x,y in _mids)
+            use_mirror = not (score_align>=20 and score_align>2*score_mirror)
+            rcp_names.append(f"{rcp_path.name} ({'mirrored' if use_mirror else 'aligned'})")
+            def mirx(x): return (2*floor_cx-x) if use_mirror else x
+            def mira(sa,ea):
+                return ((180-ea)%360,(180-sa)%360) if use_mirror else (sa,ea)
             rcp_ec=[0]
             def explode_rcp(bn,ix,iy,sx,sy,rot,d=0,in_ceil=False):
                 if d>3 or rcp_ec[0]>30000: return
@@ -548,7 +661,7 @@ def process_files(uploaded_files):
                 def xf(px,py):
                     lx,ly=px*sx,py*sy
                     rx=ix+lx*cr-ly*sr; ry=iy+lx*sr+ly*cr
-                    return 2*floor_cx-rx,ry
+                    return mirx(rx),ry
                 for be in doc_rcp.blocks[bn]:
                     if rcp_ec[0]>30000: break
                     try:
@@ -579,7 +692,7 @@ def process_files(uploaded_files):
                                 rcp_ec[0]+=1
                         elif bt=="ARC":
                             nc=xf(be.dxf.center.x,be.dxf.center.y)
-                            sa=(180-be.dxf.end_angle)%360; ea=(180-be.dxf.start_angle)%360
+                            sa,ea=mira(be.dxf.start_angle,be.dxf.end_angle)
                             out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
                                 start_angle=sa,end_angle=ea,
                                 dxfattribs={"layer":"A-RCP","color":9})
@@ -596,7 +709,6 @@ def process_files(uploaded_files):
                     t=e.dxftype()
                     if t!="INSERT" and layer in RCP_GRID: continue
                     if t!="INSERT" and not is_ceiling_layer(layer): continue
-                    def mirx(x): return 2*floor_cx-x
                     for (X1,X2,Y1,Y2) in rcp_zones:
                         placed=False
                         if t=="LINE":
@@ -619,7 +731,7 @@ def process_files(uploaded_files):
                         elif t=="ARC":
                             cx,cy=e.dxf.center.x,e.dxf.center.y
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                sa=(180-e.dxf.end_angle)%360; ea=(180-e.dxf.start_angle)%360
+                                sa,ea=mira(e.dxf.start_angle,e.dxf.end_angle)
                                 out_msp.add_arc(center=(mirx(cx),cy),radius=e.dxf.radius,
                                     start_angle=sa,end_angle=ea,
                                     dxfattribs={"layer":"A-RCP","color":9})
@@ -651,7 +763,7 @@ def process_files(uploaded_files):
     out.saveas(str(out_path))
     msg=f"Done. {ec[0]} entities, {placed_labels} labels"
     if debug_info: msg+=" | "+" | ".join(debug_info)
-    if rcp_paths: msg+=f", RCP on layer A-RCP"
+    if rcp_names: msg+=f", RCP on layer A-RCP from {'; '.join(rcp_names)}"
     return out_path.read_bytes(),msg+".",None
 
 # ── UI ────────────────────────────────────────────────────────────────────────
