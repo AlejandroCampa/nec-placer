@@ -55,14 +55,15 @@ SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
                "SECT-3","SECT-4","AVE_RENDER"}
 
-RCP_FLOOR_LAYERS = {
+# Layers to exclude from RCP (floor plan elements that shouldn't appear on ceiling)
+RCP_SKIP = set(SKIP) | {
     "AP-WALL","AR-WALLS","A-WALL","WALL","Walls","A-WALL-FULL",
     "A-FLOOR","A-FLOR","Floors","Floor",
     "A-FURNITURE","Furniture","A-FURN",
     "Plumbing Fixtures","Casework","A-MLWK",
     "AP-DOOR","AP-door-m","AP-door-swing","AP-DOOR GLASS",
-    "AP-WINDOW","AP-WINDOW M","AP-WINDOW GLASS",
-    "A-GLAZ","Curtain Wall Panels","Curtain Wall Mullions",
+    "AP-WINDOW","AP-WINDOW M","AP-WINDOW GLASS","A-GLAZ",
+    "Curtain Wall Panels","Curtain Wall Mullions",
     "AP-STAIRS","Stairs","A-STAIR",
     "AP-KITCHEN CABINETS","AP-MPFIXTURE",
     "AP-RAILING","Railings","A-FLOR-HRAL",
@@ -130,13 +131,13 @@ def process_files(uploaded_files):
 
     dxf_stems = {p.stem.lower() for p in dxf_paths}
 
-    # Separate RCP files from floor plan files
+    # Identify RCP files separately — keep them out of floor plan detection
     rcp_paths = [p for p in dxf_paths if is_rcp(p.name)]
     floor_paths = [p for p in dxf_paths if not is_rcp(p.name)]
     if not floor_paths:
         floor_paths = dxf_paths
 
-    # Scan floor plan files
+    # Scan floor plan files only
     file_meta = []
     for p in floor_paths:
         has_vp, walls, xref = quick_scan(p)
@@ -240,10 +241,7 @@ def process_files(uploaded_files):
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # Floor plan center X for RCP mirroring
     floor_cx=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
-
-    # Bounds for xref clipping
     all_x1=min(z[0] for z in zones)-200; all_x2=max(z[1] for z in zones)+200
     all_y1=min(z[2] for z in zones)-200; all_y2=max(z[3] for z in zones)+200
 
@@ -251,6 +249,7 @@ def process_files(uploaded_files):
     out_msp=out.modelspace()
     ec=[0]
 
+    # ── FLOOR PLAN EXTRACTION (exact same as working version) ─────────────────
     if xref_name:
         def ib(cx,cy): return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
         def explode(bn,ix,iy,sx,sy,rot,d=0):
@@ -310,14 +309,14 @@ def process_files(uploaded_files):
                 except: pass
     else:
         def explode(bn,ix,iy,sx,sy,rot,d=0):
-            if d>4 or ec[0]>60000: return
+            if d>3 or ec[0]>40000: return
             if bn not in doc_m.blocks: return
             cr,sr=math.cos(rot),math.sin(rot)
             def xf(px,py):
                 lx,ly=px*sx,py*sy
                 return ix+lx*cr-ly*sr,iy+lx*sr+ly*cr
             for be in doc_m.blocks[bn]:
-                if ec[0]>60000: break
+                if ec[0]>40000: break
                 try:
                     bl=getattr(be.dxf,'layer','0')
                     if bl in SKIP: continue
@@ -359,7 +358,6 @@ def process_files(uploaded_files):
                             rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
                 except: pass
 
-    # Extract floor plan
     copied=0
     for e in msp_m:
         try:
@@ -420,144 +418,6 @@ def process_files(uploaded_files):
                     break
         except: pass
 
-    # ── RCP: extract and mirror ───────────────────────────────────────────────
-    rcp_count=0
-    for rcp_path in rcp_paths:
-        try:
-            doc_rcp=ezdxf.readfile(str(rcp_path))
-            msp_rcp=doc_rcp.modelspace()
-
-            # Get RCP viewport zones
-            rcp_zones=[]
-            for layout in doc_rcp.layouts:
-                if layout.name=="Model": continue
-                for e in layout:
-                    try:
-                        if e.dxftype()=="VIEWPORT":
-                            vcp=getattr(e.dxf,'view_center_point',None)
-                            vh=getattr(e.dxf,'view_height',None)
-                            ps_w=getattr(e.dxf,'width',None)
-                            ps_h=getattr(e.dxf,'height',None)
-                            if vcp and vh and vh>0:
-                                mx,my=vcp.x,vcp.y
-                                half_h=vh/2
-                                aspect=(ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
-                                half_w=half_h*aspect
-                                if half_w<50 or half_h<50: continue
-                                rcp_zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
-                    except: pass
-
-            if not rcp_zones:
-                rcp_zones=zones
-
-            rcp_ec=[0]
-
-            def explode_rcp(bn,ix,iy,sx,sy,rot,d=0):
-                if d>3 or rcp_ec[0]>30000: return
-                if bn not in doc_rcp.blocks: return
-                cr,sr=math.cos(rot),math.sin(rot)
-                def xf(px,py):
-                    lx,ly=px*sx,py*sy
-                    rx=ix+lx*cr-ly*sr
-                    ry=iy+lx*sr+ly*cr
-                    return 2*floor_cx-rx, ry
-                for be in doc_rcp.blocks[bn]:
-                    if rcp_ec[0]>30000: break
-                    try:
-                        bl=getattr(be.dxf,'layer','0')
-                        if bl in SKIP or bl in RCP_FLOOR_LAYERS: continue
-                        bt=be.dxftype()
-                        if bt=="LINE":
-                            out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
-                                xf(be.dxf.end.x,be.dxf.end.y),
-                                dxfattribs={"layer":"A-RCP","color":9})
-                            rcp_ec[0]+=1
-                        elif bt=="LWPOLYLINE":
-                            pts=list(be.get_points())
-                            if pts:
-                                out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
-                                    dxfattribs={"layer":"A-RCP","color":9,"closed":be.is_closed})
-                                rcp_ec[0]+=1
-                        elif bt=="ARC":
-                            nc=xf(be.dxf.center.x,be.dxf.center.y)
-                            sa=(180-be.dxf.end_angle)%360
-                            ea=(180-be.dxf.start_angle)%360
-                            out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
-                                start_angle=sa,end_angle=ea,
-                                dxfattribs={"layer":"A-RCP","color":9})
-                            rcp_ec[0]+=1
-                        elif bt=="CIRCLE":
-                            out_msp.add_circle(center=xf(be.dxf.center.x,be.dxf.center.y),
-                                radius=be.dxf.radius*sx,
-                                dxfattribs={"layer":"A-RCP","color":9})
-                            rcp_ec[0]+=1
-                        elif bt=="INSERT":
-                            ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                            explode_rcp(be.dxf.name,ni,nj,
-                                sx*getattr(be.dxf,'xscale',1.0),
-                                sy*getattr(be.dxf,'yscale',1.0),
-                                rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
-                    except: pass
-
-            for e in msp_rcp:
-                try:
-                    layer=getattr(e.dxf,'layer','0')
-                    if layer in SKIP or layer in RCP_FLOOR_LAYERS: continue
-                    t=e.dxftype()
-                    for (X1,X2,Y1,Y2) in rcp_zones:
-                        placed=False
-                        mx_x=lambda x: 2*floor_cx-x
-                        if t=="LINE":
-                            cx=(e.dxf.start.x+e.dxf.end.x)/2
-                            cy=(e.dxf.start.y+e.dxf.end.y)/2
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                out_msp.add_line(
-                                    (mx_x(e.dxf.start.x),e.dxf.start.y),
-                                    (mx_x(e.dxf.end.x),e.dxf.end.y),
-                                    dxfattribs={"layer":"A-RCP","color":9})
-                                placed=True
-                        elif t=="LWPOLYLINE":
-                            pts=list(e.get_points())
-                            if pts:
-                                cx=sum(p[0] for p in pts)/len(pts)
-                                cy=sum(p[1] for p in pts)/len(pts)
-                                if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                    out_msp.add_lwpolyline(
-                                        [(mx_x(p[0]),p[1]) for p in pts],
-                                        dxfattribs={"layer":"A-RCP","color":9,"closed":e.is_closed})
-                                    placed=True
-                        elif t=="ARC":
-                            cx,cy=e.dxf.center.x,e.dxf.center.y
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                sa=(180-e.dxf.end_angle)%360
-                                ea=(180-e.dxf.start_angle)%360
-                                out_msp.add_arc(center=(mx_x(cx),cy),radius=e.dxf.radius,
-                                    start_angle=sa,end_angle=ea,
-                                    dxfattribs={"layer":"A-RCP","color":9})
-                                placed=True
-                        elif t=="CIRCLE":
-                            cx,cy=e.dxf.center.x,e.dxf.center.y
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                out_msp.add_circle(center=(mx_x(cx),cy),radius=e.dxf.radius,
-                                    dxfattribs={"layer":"A-RCP","color":9})
-                                placed=True
-                        elif t=="INSERT":
-                            cx,cy=e.dxf.insert.x,e.dxf.insert.y
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                explode_rcp(e.dxf.name,mx_x(cx),cy,
-                                    getattr(e.dxf,'xscale',1.0),
-                                    getattr(e.dxf,'yscale',1.0),
-                                    math.radians(getattr(e.dxf,'rotation',0.0)))
-                                placed=True
-                        if placed:
-                            rcp_count+=rcp_ec[0]
-                            break
-                except: pass
-
-            del doc_rcp
-        except Exception as ex:
-            st.write(f"RCP error: {ex}")
-
     # Labels
     placed_labels=0
     if not xref_name:
@@ -611,10 +471,148 @@ def process_files(uploaded_files):
                 "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
             placed_labels+=1
 
+    # ── RCP: pure addition, does not touch floor plan above ───────────────────
+    rcp_count=0
+    for rcp_path in rcp_paths:
+        try:
+            doc_rcp=ezdxf.readfile(str(rcp_path))
+            msp_rcp=doc_rcp.modelspace()
+
+            # Get RCP viewport zone
+            rcp_zones=[]
+            for layout in doc_rcp.layouts:
+                if layout.name=="Model": continue
+                for e in layout:
+                    try:
+                        if e.dxftype()=="VIEWPORT":
+                            vcp=getattr(e.dxf,'view_center_point',None)
+                            vh=getattr(e.dxf,'view_height',None)
+                            ps_w=getattr(e.dxf,'width',None)
+                            ps_h=getattr(e.dxf,'height',None)
+                            if vcp and vh and vh>0:
+                                mx,my=vcp.x,vcp.y
+                                half_h=vh/2
+                                aspect=(ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
+                                half_w=half_h*aspect
+                                if half_w<50 or half_h<50: continue
+                                rcp_zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
+                    except: pass
+
+            if not rcp_zones:
+                rcp_zones=zones
+
+            rcp_ec=[0]
+
+            def explode_rcp(bn,ix,iy,sx,sy,rot,d=0):
+                if d>3 or rcp_ec[0]>30000: return
+                if bn not in doc_rcp.blocks: return
+                cr,sr=math.cos(rot),math.sin(rot)
+                def xf(px,py):
+                    lx,ly=px*sx,py*sy
+                    rx=ix+lx*cr-ly*sr
+                    ry=iy+lx*sr+ly*cr
+                    return 2*floor_cx-rx, ry
+                for be in doc_rcp.blocks[bn]:
+                    if rcp_ec[0]>30000: break
+                    try:
+                        bl=getattr(be.dxf,'layer','0')
+                        if bl in RCP_SKIP: continue
+                        bt=be.dxftype()
+                        if bt=="LINE":
+                            out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
+                                xf(be.dxf.end.x,be.dxf.end.y),
+                                dxfattribs={"layer":"A-RCP","color":9})
+                            rcp_ec[0]+=1
+                        elif bt=="LWPOLYLINE":
+                            pts=list(be.get_points())
+                            if pts:
+                                out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
+                                    dxfattribs={"layer":"A-RCP","color":9,"closed":be.is_closed})
+                                rcp_ec[0]+=1
+                        elif bt=="ARC":
+                            nc=xf(be.dxf.center.x,be.dxf.center.y)
+                            sa=(180-be.dxf.end_angle)%360
+                            ea=(180-be.dxf.start_angle)%360
+                            out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
+                                start_angle=sa,end_angle=ea,
+                                dxfattribs={"layer":"A-RCP","color":9})
+                            rcp_ec[0]+=1
+                        elif bt=="CIRCLE":
+                            out_msp.add_circle(center=xf(be.dxf.center.x,be.dxf.center.y),
+                                radius=be.dxf.radius*sx,
+                                dxfattribs={"layer":"A-RCP","color":9})
+                            rcp_ec[0]+=1
+                        elif bt=="INSERT":
+                            ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
+                            explode_rcp(be.dxf.name,ni,nj,
+                                sx*getattr(be.dxf,'xscale',1.0),
+                                sy*getattr(be.dxf,'yscale',1.0),
+                                rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
+                    except: pass
+
+            for e in msp_rcp:
+                try:
+                    layer=getattr(e.dxf,'layer','0')
+                    if layer in RCP_SKIP: continue
+                    t=e.dxftype()
+                    for (X1,X2,Y1,Y2) in rcp_zones:
+                        placed=False
+                        def mx(x): return 2*floor_cx-x
+                        if t=="LINE":
+                            cx=(e.dxf.start.x+e.dxf.end.x)/2
+                            cy=(e.dxf.start.y+e.dxf.end.y)/2
+                            if X1<=cx<=X2 and Y1<=cy<=Y2:
+                                out_msp.add_line(
+                                    (mx(e.dxf.start.x),e.dxf.start.y),
+                                    (mx(e.dxf.end.x),e.dxf.end.y),
+                                    dxfattribs={"layer":"A-RCP","color":9})
+                                placed=True
+                        elif t=="LWPOLYLINE":
+                            pts=list(e.get_points())
+                            if pts:
+                                cx=sum(p[0] for p in pts)/len(pts)
+                                cy=sum(p[1] for p in pts)/len(pts)
+                                if X1<=cx<=X2 and Y1<=cy<=Y2:
+                                    out_msp.add_lwpolyline(
+                                        [(mx(p[0]),p[1]) for p in pts],
+                                        dxfattribs={"layer":"A-RCP","color":9,"closed":e.is_closed})
+                                    placed=True
+                        elif t=="ARC":
+                            cx,cy=e.dxf.center.x,e.dxf.center.y
+                            if X1<=cx<=X2 and Y1<=cy<=Y2:
+                                sa=(180-e.dxf.end_angle)%360
+                                ea=(180-e.dxf.start_angle)%360
+                                out_msp.add_arc(center=(mx(cx),cy),radius=e.dxf.radius,
+                                    start_angle=sa,end_angle=ea,
+                                    dxfattribs={"layer":"A-RCP","color":9})
+                                placed=True
+                        elif t=="CIRCLE":
+                            cx,cy=e.dxf.center.x,e.dxf.center.y
+                            if X1<=cx<=X2 and Y1<=cy<=Y2:
+                                out_msp.add_circle(center=(mx(cx),cy),radius=e.dxf.radius,
+                                    dxfattribs={"layer":"A-RCP","color":9})
+                                placed=True
+                        elif t=="INSERT":
+                            cx,cy=e.dxf.insert.x,e.dxf.insert.y
+                            if X1<=cx<=X2 and Y1<=cy<=Y2:
+                                explode_rcp(e.dxf.name,mx(cx),cy,
+                                    getattr(e.dxf,'xscale',1.0),
+                                    getattr(e.dxf,'yscale',1.0),
+                                    math.radians(getattr(e.dxf,'rotation',0.0)))
+                                placed=True
+                        if placed:
+                            rcp_count+=1
+                            break
+                except: pass
+
+            del doc_rcp
+        except Exception as ex:
+            st.write(f"RCP error: {ex}")
+
     out_path=tmp/"floor_plan_clean.dxf"
     out.saveas(str(out_path))
     msg=f"Done. {ec[0]} entities, {placed_labels} labels"
-    if rcp_paths: msg+=f", RCP mirrored on layer A-RCP"
+    if rcp_paths: msg+=f", {rcp_count} RCP entities (mirrored, layer A-RCP)"
     return out_path.read_bytes(),msg+".",None
 
 # CHAT UI
