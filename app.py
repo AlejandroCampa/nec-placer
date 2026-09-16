@@ -55,6 +55,8 @@ SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
                "SECT-3","SECT-4","AVE_RENDER"}
 
+MAX_ENTITIES = 100000
+
 def clean_mtext(txt):
     txt = re.sub(r'\\f[^;]+;','',txt)
     txt = re.sub(r'\\[A-Za-z][^;]*;','',txt)
@@ -176,8 +178,6 @@ def process_files(uploaded_files):
             except: pass
 
     # ── Find ground floor via wall clusters (xref projects only) ─────────────
-    # Only look at NEGATIVE Y clusters → excludes positive-Y lot copies
-    # Pick the HIGHEST center Y → that's the ground floor (above basement)
     if xref_name and zones:
         lot_x1 = min(z[0] for z in zones)
         lot_x2 = max(z[1] for z in zones)
@@ -191,7 +191,6 @@ def process_files(uploaded_files):
                    ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
                     cx=(e.dxf.start.x+e.dxf.end.x)/2
                     cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    # Only NEGATIVE Y, within lot X, outside viewport zone
                     if lot_x1<=cx<=lot_x2 and cy<0 and \
                        not (covered_y1<=cy<=covered_y2):
                         wall_ys.append(cy)
@@ -209,10 +208,9 @@ def process_files(uploaded_files):
                 else: clusters.append(cur); cur=[sb[i]]
             if cur: clusters.append(cur)
 
-            # Pick cluster with HIGHEST center Y (ground floor, above basement)
             valid = [c for c in clusters
                      if sum(bands.get(b,0) for b in c) >= 20
-                     and sum(c)/len(c) < 0]  # Must be negative Y
+                     and sum(c)/len(c) < 0]
             if valid:
                 best = max(valid, key=lambda c: sum(c)/len(c))
                 y1,y2 = min(best)-300, max(best)+300
@@ -221,27 +219,29 @@ def process_files(uploaded_files):
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
+    # ── Global bounds for clipping exploded blocks ────────────────────────────
+    all_x1 = min(z[0] for z in zones) - 200
+    all_x2 = max(z[1] for z in zones) + 200
+    all_y1 = min(z[2] for z in zones) - 200
+    all_y2 = max(z[3] for z in zones) + 200
+
+    def in_bounds(cx, cy):
+        return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
+
     # ── Extract geometry ──────────────────────────────────────────────────────
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
-    copied  = 0
-
-      # Overall bounds for explode clipping
-    all_x1_e = min(z[0] for z in zones) - 200
-    all_x2_e = max(z[1] for z in zones) + 200
-    all_y1_e = min(z[2] for z in zones) - 200
-    all_y2_e = max(z[3] for z in zones) + 200
+    entity_count = [0]
 
     def explode(blk_name, ix, iy, sx, sy, rot, depth=0):
-        if depth>5: return
+        if depth>3 or entity_count[0]>MAX_ENTITIES: return
         if blk_name not in doc_m.blocks: return
         cr,sr = math.cos(rot),math.sin(rot)
         def xf(px,py):
             lx,ly=px*sx,py*sy
             return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
-        def in_bounds(cx, cy):
-            return all_x1_e<=cx<=all_x2_e and all_y1_e<=cy<=all_y2_e
         for be in doc_m.blocks[blk_name]:
+            if entity_count[0]>MAX_ENTITIES: break
             try:
                 bl = getattr(be.dxf,'layer','0')
                 if bl in SKIP: continue
@@ -251,6 +251,7 @@ def process_files(uploaded_files):
                     p2=xf(be.dxf.end.x,be.dxf.end.y)
                     if in_bounds((p1[0]+p2[0])/2,(p1[1]+p2[1])/2):
                         out_msp.add_line(p1,p2,dxfattribs={"layer":bl,"color":8})
+                        entity_count[0]+=1
                 elif bt=="LWPOLYLINE":
                     pts=list(be.get_points())
                     if pts:
@@ -258,7 +259,9 @@ def process_files(uploaded_files):
                         cx=sum(p[0] for p in tpts)/len(tpts)
                         cy=sum(p[1] for p in tpts)/len(tpts)
                         if in_bounds(cx,cy):
-                            out_msp.add_lwpolyline(tpts,dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                            out_msp.add_lwpolyline(tpts,
+                                dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                            entity_count[0]+=1
                 elif bt=="ARC":
                     nc=xf(be.dxf.center.x,be.dxf.center.y)
                     if in_bounds(nc[0],nc[1]):
@@ -266,10 +269,13 @@ def process_files(uploaded_files):
                             start_angle=be.dxf.start_angle+math.degrees(rot),
                             end_angle=be.dxf.end_angle+math.degrees(rot),
                             dxfattribs={"layer":bl,"color":8})
+                        entity_count[0]+=1
                 elif bt=="CIRCLE":
                     nc=xf(be.dxf.center.x,be.dxf.center.y)
                     if in_bounds(nc[0],nc[1]):
-                        out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,dxfattribs={"layer":bl,"color":8})
+                        out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
+                            dxfattribs={"layer":bl,"color":8})
+                        entity_count[0]+=1
                 elif bt=="SPLINE":
                     spts=list(be.control_points)
                     if spts:
@@ -277,7 +283,9 @@ def process_files(uploaded_files):
                         cx=sum(p[0] for p in tpts)/len(tpts)
                         cy=sum(p[1] for p in tpts)/len(tpts)
                         if in_bounds(cx,cy):
-                            out_msp.add_lwpolyline(tpts,dxfattribs={"layer":bl,"color":8})
+                            out_msp.add_lwpolyline(tpts,
+                                dxfattribs={"layer":bl,"color":8})
+                            entity_count[0]+=1
                 elif bt=="INSERT":
                     nix,niy=xf(be.dxf.insert.x,be.dxf.insert.y)
                     if in_bounds(nix,niy):
@@ -287,7 +295,9 @@ def process_files(uploaded_files):
                             rot+math.radians(getattr(be.dxf,'rotation',0.0)),depth+1)
             except: pass
 
+    copied = 0
     for e in msp_m:
+        if entity_count[0]>MAX_ENTITIES: break
         try:
             layer=getattr(e.dxf,'layer','0')
             if layer in SKIP: continue
@@ -302,6 +312,7 @@ def process_files(uploaded_files):
                             (e.dxf.start.x,e.dxf.start.y),
                             (e.dxf.end.x,e.dxf.end.y),
                             dxfattribs={"layer":layer,"color":8})
+                        entity_count[0]+=1
                         placed=True
                 elif t=="LWPOLYLINE":
                     pts=list(e.get_points())
@@ -312,6 +323,7 @@ def process_files(uploaded_files):
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
                                 dxfattribs={"layer":layer,"color":8,
                                             "closed":e.is_closed})
+                            entity_count[0]+=1
                             placed=True
                 elif t=="ARC":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
@@ -320,12 +332,14 @@ def process_files(uploaded_files):
                             start_angle=e.dxf.start_angle,
                             end_angle=e.dxf.end_angle,
                             dxfattribs={"layer":layer,"color":8})
+                        entity_count[0]+=1
                         placed=True
                 elif t=="CIRCLE":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_circle(center=(cx,cy),radius=e.dxf.radius,
                             dxfattribs={"layer":layer,"color":8})
+                        entity_count[0]+=1
                         placed=True
                 elif t=="SPLINE":
                     pts=list(e.control_points)
@@ -335,6 +349,7 @@ def process_files(uploaded_files):
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
                                 dxfattribs={"layer":layer,"color":8})
+                            entity_count[0]+=1
                             placed=True
                 elif t=="INSERT":
                     cx,cy=e.dxf.insert.x,e.dxf.insert.y
@@ -353,7 +368,6 @@ def process_files(uploaded_files):
     placed_labels = 0
 
     if not xref_name:
-        # Non-xref projects (Revit/Volvo): labels work perfectly as-is
         for e in doc_a1.modelspace():
             try:
                 if e.dxftype() in ["TEXT","MTEXT"]:
@@ -365,24 +379,21 @@ def process_files(uploaded_files):
                         txt_rot=getattr(e.dxf,'rotation',0.0)
                         h=getattr(e.dxf,'char_height',20)
                     if len(txt)<2: continue
-                    mx,my = ix,iy
                     for (X1,X2,Y1,Y2) in zones:
-                        if X1<=mx<=X2 and Y1<=my<=Y2:
+                        if X1<=ix<=X2 and Y1<=iy<=Y2:
                             out_msp.add_text(txt[:50],dxfattribs={
                                 "layer":"ROOM-LABELS","color":253,
-                                "insert":(mx,my),"height":h,
+                                "insert":(ix,iy),"height":h,
                                 "rotation":txt_rot})
                             placed_labels+=1
                             break
             except: pass
     else:
-        # Xref projects: labels have X offset — correct it using zone center
-        # Step 1: find ground floor zone (highest Y = least negative)
+        # Xref: find ground floor zone and correct X offset for labels
         ground_zone = max(zones, key=lambda z: (z[2]+z[3])/2)
         gx1,gx2,gy1,gy2 = ground_zone
         zone_x_center = (gx1+gx2)/2
 
-        # Step 2: transform all A-1 labels and find their average X
         transformed_labels = []
         for e in doc_a1.modelspace():
             try:
@@ -397,28 +408,25 @@ def process_files(uploaded_files):
                     if len(txt)<2: continue
                     mx,my = a1_to_master(ix,iy)
                     txt_rot = txt_rot - math.degrees(xref_rot)
-                    # Only keep labels that fall in ground floor Y range
                     if gy1<=my<=gy2:
                         transformed_labels.append((mx,my,txt,h*xref_sx,txt_rot))
             except: pass
 
-        # Step 3: compute X correction
         x_correction = 0
         if transformed_labels:
-            avg_x = sum(mx for mx,my,t,h,r in transformed_labels) / len(transformed_labels)
+            avg_x = sum(mx for mx,my,t,h,r in transformed_labels)/len(transformed_labels)
             x_correction = zone_x_center - avg_x
 
-        # Step 4: place labels with X correction
         for mx,my,txt,h,txt_rot in transformed_labels:
             out_msp.add_text(txt[:50],dxfattribs={
                 "layer":"ROOM-LABELS","color":253,
-                "insert":(mx+x_correction, my),
+                "insert":(mx+x_correction,my),
                 "height":h,"rotation":txt_rot})
             placed_labels+=1
 
     out_path = tmp / "floor_plan_clean.dxf"
     out.saveas(str(out_path))
-    return out_path.read_bytes(), f"Done. {copied} entities, {placed_labels} labels.", None
+    return out_path.read_bytes(), f"Done. {entity_count[0]} entities, {placed_labels} labels.", None
 
 # ── CHAT UI ───────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
