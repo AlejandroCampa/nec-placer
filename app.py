@@ -226,6 +226,12 @@ def process_files(uploaded_files):
     out_msp = out.modelspace()
     copied  = 0
 
+      # Overall bounds for explode clipping
+    all_x1_e = min(z[0] for z in zones) - 200
+    all_x2_e = max(z[1] for z in zones) + 200
+    all_y1_e = min(z[2] for z in zones) - 200
+    all_y2_e = max(z[3] for z in zones) + 200
+
     def explode(blk_name, ix, iy, sx, sy, rot, depth=0):
         if depth>5: return
         if blk_name not in doc_m.blocks: return
@@ -233,41 +239,52 @@ def process_files(uploaded_files):
         def xf(px,py):
             lx,ly=px*sx,py*sy
             return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
+        def in_bounds(cx, cy):
+            return all_x1_e<=cx<=all_x2_e and all_y1_e<=cy<=all_y2_e
         for be in doc_m.blocks[blk_name]:
             try:
                 bl = getattr(be.dxf,'layer','0')
                 if bl in SKIP: continue
                 bt = be.dxftype()
                 if bt=="LINE":
-                    out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
-                        xf(be.dxf.end.x,be.dxf.end.y),
-                        dxfattribs={"layer":bl,"color":8})
+                    p1=xf(be.dxf.start.x,be.dxf.start.y)
+                    p2=xf(be.dxf.end.x,be.dxf.end.y)
+                    if in_bounds((p1[0]+p2[0])/2,(p1[1]+p2[1])/2):
+                        out_msp.add_line(p1,p2,dxfattribs={"layer":bl,"color":8})
                 elif bt=="LWPOLYLINE":
                     pts=list(be.get_points())
                     if pts:
-                        out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
-                            dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                        tpts=[xf(p[0],p[1]) for p in pts]
+                        cx=sum(p[0] for p in tpts)/len(tpts)
+                        cy=sum(p[1] for p in tpts)/len(tpts)
+                        if in_bounds(cx,cy):
+                            out_msp.add_lwpolyline(tpts,dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
                 elif bt=="ARC":
                     nc=xf(be.dxf.center.x,be.dxf.center.y)
-                    out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
-                        start_angle=be.dxf.start_angle+math.degrees(rot),
-                        end_angle=be.dxf.end_angle+math.degrees(rot),
-                        dxfattribs={"layer":bl,"color":8})
+                    if in_bounds(nc[0],nc[1]):
+                        out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
+                            start_angle=be.dxf.start_angle+math.degrees(rot),
+                            end_angle=be.dxf.end_angle+math.degrees(rot),
+                            dxfattribs={"layer":bl,"color":8})
                 elif bt=="CIRCLE":
                     nc=xf(be.dxf.center.x,be.dxf.center.y)
-                    out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
-                        dxfattribs={"layer":bl,"color":8})
+                    if in_bounds(nc[0],nc[1]):
+                        out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,dxfattribs={"layer":bl,"color":8})
                 elif bt=="SPLINE":
                     spts=list(be.control_points)
                     if spts:
-                        out_msp.add_lwpolyline([xf(p[0],p[1]) for p in spts],
-                            dxfattribs={"layer":bl,"color":8})
+                        tpts=[xf(p[0],p[1]) for p in spts]
+                        cx=sum(p[0] for p in tpts)/len(tpts)
+                        cy=sum(p[1] for p in tpts)/len(tpts)
+                        if in_bounds(cx,cy):
+                            out_msp.add_lwpolyline(tpts,dxfattribs={"layer":bl,"color":8})
                 elif bt=="INSERT":
                     nix,niy=xf(be.dxf.insert.x,be.dxf.insert.y)
-                    explode(be.dxf.name,nix,niy,
-                        sx*getattr(be.dxf,'xscale',1.0),
-                        sy*getattr(be.dxf,'yscale',1.0),
-                        rot+math.radians(getattr(be.dxf,'rotation',0.0)),depth+1)
+                    if in_bounds(nix,niy):
+                        explode(be.dxf.name,nix,niy,
+                            sx*getattr(be.dxf,'xscale',1.0),
+                            sy*getattr(be.dxf,'yscale',1.0),
+                            rot+math.radians(getattr(be.dxf,'rotation',0.0)),depth+1)
             except: pass
 
     for e in msp_m:
