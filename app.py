@@ -455,13 +455,17 @@ def process_files(uploaded_files):
         del doc_a1, msp_m
         gc.collect()
 
-        # Exact layer whitelist from A103 scan
-        RCP_LAYERS = {
-            "A-CLNG", "A-CLNG-IDEN", "A-CLNG-PATT",
-            "E-LITE", "E-LITE-EQPM",
+        # Blacklist: exclude obvious floor plan layers, include everything else
+        RCP_SKIP_LAYERS = {
+            "A-WALL","A-WALL-PATT","A-FLOR",
+            "A-GLAZ-CURT","A-GLAZ-CWMG","I-WALL",
+            "A-ANNO-DIMS","A-ANNO-DIMS-96",
+            "G-ANNO-NPLT","G-ANNO-TEXT",
+            "G-ANNO-TTLB","G-ANNO-TTLB-WIDE",
+            "A-AREA-IDEN",
         }
         def is_ceiling_layer(n):
-            return n in RCP_LAYERS
+            return n not in RCP_SKIP_LAYERS
 
         floor_cx = (min(z[0] for z in zones) + max(z[1] for z in zones)) / 2
 
