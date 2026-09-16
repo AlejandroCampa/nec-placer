@@ -455,15 +455,13 @@ def process_files(uploaded_files):
         del doc_a1, msp_m
         gc.collect()
 
+        # Exact layer whitelist from A103 scan
+        RCP_LAYERS = {
+            "A-CLNG", "A-CLNG-IDEN", "A-CLNG-PATT",
+            "E-LITE", "E-LITE-EQPM",
+        }
         def is_ceiling_layer(n):
-            n = n.upper()
-            return any(k in n for k in [
-                "CEIL","CLNG","LIGHT","FIX","HVAC","MECH",
-                "SPRIN","FIRE","DIFFUS","VENT","RCP","RECESS",
-                "PEND","SUSP","TILE","GRID","FLUOR","LED",
-                "EXHAUST","SUPPLY","RETURN","DUCT","AIR",
-                "SMOKE","DETECT","ALARM","SPRINK",
-            ])
+            return n in RCP_LAYERS
 
         floor_cx = (min(z[0] for z in zones) + max(z[1] for z in zones)) / 2
 
@@ -472,18 +470,6 @@ def process_files(uploaded_files):
                 doc_rcp = ezdxf.readfile(str(rcp_path))
                 msp_rcp = doc_rcp.modelspace()
 
-                # DEBUG: show all unique layers in RCP file
-                rcp_layers = set()
-                for e in msp_rcp:
-                    try: rcp_layers.add(getattr(e.dxf,'layer','0'))
-                    except: pass
-                for block in doc_rcp.blocks:
-                    for be in block:
-                        try: rcp_layers.add(getattr(be.dxf,'layer','0'))
-                        except: pass
-                st.write("RCP layers found:")
-                for l in sorted(rcp_layers):
-                    st.write(f"  → {l}")
 
                 # Get RCP viewport zones — don't fall back to floor zones
                 rcp_zones = []
