@@ -472,6 +472,19 @@ def process_files(uploaded_files):
                 doc_rcp = ezdxf.readfile(str(rcp_path))
                 msp_rcp = doc_rcp.modelspace()
 
+                # DEBUG: show all unique layers in RCP file
+                rcp_layers = set()
+                for e in msp_rcp:
+                    try: rcp_layers.add(getattr(e.dxf,'layer','0'))
+                    except: pass
+                for bn in doc_rcp.blocks:
+                    for be in doc_rcp.blocks[bn]:
+                        try: rcp_layers.add(getattr(be.dxf,'layer','0'))
+                        except: pass
+                st.write("RCP layers found:")
+                for l in sorted(rcp_layers):
+                    st.write(f"  → {l}")
+
                 # Get RCP viewport zones — don't fall back to floor zones
                 rcp_zones = []
                 for layout in doc_rcp.layouts:
