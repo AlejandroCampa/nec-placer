@@ -65,7 +65,7 @@ def clean_mtext(txt):
 
 def sheet_score(name):
     n = name.lower()
-    if any(k in n for k in ["floor plan","ground","a101","a-1","a1"]): return 2
+    if any(k in n for k in ["floor plan","ground","a101","a-1"]): return 2
     if any(k in n for k in ["site","rcp","roof","ceiling","reflected"]): return 0
     return 1
 
@@ -417,12 +417,12 @@ def process_files(uploaded_files):
                             placed_labels+=1
                             break
             except: pass
-    else:
-        # Use combined Y span of all zones for label matching
+        # For xref: find label clusters in A-1 space, pick the densest one
+        # (ground floor labels cluster at a different Y than basement labels)
         zone_x_center=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
-        all_y1=min(z[2] for z in zones)
-        all_y2=max(z[3] for z in zones)
-        tl=[]
+
+        # Collect all label Y positions in A-1 space to find ground floor cluster
+        label_data=[]
         for e in doc_a1.modelspace():
             try:
                 if e.dxftype() in ["TEXT","MTEXT"]:
@@ -434,21 +434,33 @@ def process_files(uploaded_files):
                         txt_rot=getattr(e.dxf,'rotation',0.0)
                         h=getattr(e.dxf,'char_height',20)
                     if len(txt)<2: continue
-                    mx,my=a1_to_master(ix,iy)
-                    txt_rot=txt_rot-math.degrees(xref_rot)
-                    # Use combined Y range and a tolerance buffer
-                    if (all_y1-500)<=my<=(all_y2+500):
-                        tl.append((mx,my,txt,h*xref_sx,txt_rot))
+                    label_data.append((ix,iy,txt,h,txt_rot))
             except: pass
-        xc=0
-        if tl:
-            avg_x=sum(mx for mx,my,t,h,r in tl)/len(tl)
-            xc=zone_x_center-avg_x
-        for mx,my,txt,h,txt_rot in tl:
-            out_msp.add_text(txt[:50],dxfattribs={
-                "layer":"ROOM-LABELS","color":253,
-                "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
-            placed_labels+=1
+
+        # Find the Y cluster with the most labels in A-1 space
+        # Ground floor labels are denser and at more negative Y than basement
+        if label_data:
+            ys=[iy for ix,iy,t,h,r in label_data]
+            bands={}
+            for y in ys:
+                b=round(y/500)*500; bands[b]=bands.get(b,0)+1
+            best_band=max(bands,key=bands.get)
+            # Include labels within 1500 units of the densest band
+            tl=[]
+            for ix,iy,txt,h,txt_rot in label_data:
+                if abs(iy-best_band)<=1500:
+                    mx,my=a1_to_master(ix,iy)
+                    tr=txt_rot-math.degrees(xref_rot)
+                    tl.append((mx,my,txt,h*xref_sx,tr))
+            xc=0
+            if tl:
+                avg_x=sum(mx for mx,my,t,h,r in tl)/len(tl)
+                xc=zone_x_center-avg_x
+            for mx,my,txt,h,txt_rot in tl:
+                out_msp.add_text(txt[:50],dxfattribs={
+                    "layer":"ROOM-LABELS","color":253,
+                    "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
+                placed_labels+=1
 
 
     # ── RCP: pure append, free floor plan memory first ───────────────────────
