@@ -22,8 +22,8 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 RUN mkdir -p /app/.streamlit && \
-    echo -e "[server]\nmaxUploadSize = 500\nmaxMessageSize = 500" > /app/.streamlit/config.toml
-    
+    printf '[server]\nmaxUploadSize = 500\nmaxMessageSize = 500\n' > /app/.streamlit/config.toml
+
 COPY app.py .
 EXPOSE 8501
 CMD ["streamlit", "run", "app.py", \
