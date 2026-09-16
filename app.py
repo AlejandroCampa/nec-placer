@@ -55,8 +55,6 @@ SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
                "SECT-3","SECT-4","AVE_RENDER"}
 
-MAX_ENTITIES = 100000
-
 def clean_mtext(txt):
     txt = re.sub(r'\\f[^;]+;','',txt)
     txt = re.sub(r'\\[A-Za-z][^;]*;','',txt)
@@ -219,85 +217,135 @@ def process_files(uploaded_files):
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
 
-    # ── Global bounds for clipping exploded blocks ────────────────────────────
-    all_x1 = min(z[0] for z in zones) - 200
-    all_x2 = max(z[1] for z in zones) + 200
-    all_y1 = min(z[2] for z in zones) - 200
-    all_y2 = max(z[3] for z in zones) + 200
-
-    def in_bounds(cx, cy):
-        return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
-
     # ── Extract geometry ──────────────────────────────────────────────────────
     out     = ezdxf.new("R2018")
     out_msp = out.modelspace()
-    entity_count = [0]
+    copied  = 0
 
-    def explode(blk_name, ix, iy, sx, sy, rot, depth=0):
-        if depth>3 or entity_count[0]>MAX_ENTITIES: return
-        if blk_name not in doc_m.blocks: return
-        cr,sr = math.cos(rot),math.sin(rot)
-        def xf(px,py):
-            lx,ly=px*sx,py*sy
-            return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
-        for be in doc_m.blocks[blk_name]:
-            if entity_count[0]>MAX_ENTITIES: break
-            try:
-                bl = getattr(be.dxf,'layer','0')
-                if bl in SKIP: continue
-                bt = be.dxftype()
-                if bt=="LINE":
-                    p1=xf(be.dxf.start.x,be.dxf.start.y)
-                    p2=xf(be.dxf.end.x,be.dxf.end.y)
-                    if in_bounds((p1[0]+p2[0])/2,(p1[1]+p2[1])/2):
-                        out_msp.add_line(p1,p2,dxfattribs={"layer":bl,"color":8})
-                        entity_count[0]+=1
-                elif bt=="LWPOLYLINE":
-                    pts=list(be.get_points())
-                    if pts:
-                        tpts=[xf(p[0],p[1]) for p in pts]
-                        cx=sum(p[0] for p in tpts)/len(tpts)
-                        cy=sum(p[1] for p in tpts)/len(tpts)
-                        if in_bounds(cx,cy):
-                            out_msp.add_lwpolyline(tpts,
-                                dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+    if xref_name:
+        # Traditional xref (Irizarry): bounds-clipped explode to prevent 3rd floor
+        all_x1 = min(z[0] for z in zones) - 200
+        all_x2 = max(z[1] for z in zones) + 200
+        all_y1 = min(z[2] for z in zones) - 200
+        all_y2 = max(z[3] for z in zones) + 200
+
+        def in_bounds(cx, cy):
+            return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
+
+        entity_count = [0]
+        MAX_ENTITIES = 80000
+
+        def explode_xref(blk_name, ix, iy, sx, sy, rot, depth=0):
+            if depth>5 or entity_count[0]>MAX_ENTITIES: return
+            if blk_name not in doc_m.blocks: return
+            cr,sr = math.cos(rot),math.sin(rot)
+            def xf(px,py):
+                lx,ly=px*sx,py*sy
+                return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
+            for be in doc_m.blocks[blk_name]:
+                if entity_count[0]>MAX_ENTITIES: break
+                try:
+                    bl = getattr(be.dxf,'layer','0')
+                    if bl in SKIP: continue
+                    bt = be.dxftype()
+                    if bt=="LINE":
+                        p1=xf(be.dxf.start.x,be.dxf.start.y)
+                        p2=xf(be.dxf.end.x,be.dxf.end.y)
+                        if in_bounds((p1[0]+p2[0])/2,(p1[1]+p2[1])/2):
+                            out_msp.add_line(p1,p2,dxfattribs={"layer":bl,"color":8})
                             entity_count[0]+=1
-                elif bt=="ARC":
-                    nc=xf(be.dxf.center.x,be.dxf.center.y)
-                    if in_bounds(nc[0],nc[1]):
+                    elif bt=="LWPOLYLINE":
+                        pts=list(be.get_points())
+                        if pts:
+                            tpts=[xf(p[0],p[1]) for p in pts]
+                            cx=sum(p[0] for p in tpts)/len(tpts)
+                            cy=sum(p[1] for p in tpts)/len(tpts)
+                            if in_bounds(cx,cy):
+                                out_msp.add_lwpolyline(tpts,dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                                entity_count[0]+=1
+                    elif bt=="ARC":
+                        nc=xf(be.dxf.center.x,be.dxf.center.y)
+                        if in_bounds(nc[0],nc[1]):
+                            out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
+                                start_angle=be.dxf.start_angle+math.degrees(rot),
+                                end_angle=be.dxf.end_angle+math.degrees(rot),
+                                dxfattribs={"layer":bl,"color":8})
+                            entity_count[0]+=1
+                    elif bt=="CIRCLE":
+                        nc=xf(be.dxf.center.x,be.dxf.center.y)
+                        if in_bounds(nc[0],nc[1]):
+                            out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
+                                dxfattribs={"layer":bl,"color":8})
+                            entity_count[0]+=1
+                    elif bt=="SPLINE":
+                        spts=list(be.control_points)
+                        if spts:
+                            tpts=[xf(p[0],p[1]) for p in spts]
+                            cx=sum(p[0] for p in tpts)/len(tpts)
+                            cy=sum(p[1] for p in tpts)/len(tpts)
+                            if in_bounds(cx,cy):
+                                out_msp.add_lwpolyline(tpts,dxfattribs={"layer":bl,"color":8})
+                                entity_count[0]+=1
+                    elif bt=="INSERT":
+                        nix,niy=xf(be.dxf.insert.x,be.dxf.insert.y)
+                        if in_bounds(nix,niy):
+                            explode_xref(be.dxf.name,nix,niy,
+                                sx*getattr(be.dxf,'xscale',1.0),
+                                sy*getattr(be.dxf,'yscale',1.0),
+                                rot+math.radians(getattr(be.dxf,'rotation',0.0)),depth+1)
+                except: pass
+
+        explode_fn = explode_xref
+
+    else:
+        # Revit/embedded (Volvo): exact working code, no bounds check, full depth
+        def explode_revit(blk_name, ix, iy, sx, sy, rot, depth=0):
+            if depth>5: return
+            if blk_name not in doc_m.blocks: return
+            cr,sr = math.cos(rot),math.sin(rot)
+            def xf(px,py):
+                lx,ly=px*sx,py*sy
+                return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
+            for be in doc_m.blocks[blk_name]:
+                try:
+                    bl = getattr(be.dxf,'layer','0')
+                    if bl in SKIP: continue
+                    bt = be.dxftype()
+                    if bt=="LINE":
+                        out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
+                            xf(be.dxf.end.x,be.dxf.end.y),
+                            dxfattribs={"layer":bl,"color":8})
+                    elif bt=="LWPOLYLINE":
+                        pts=list(be.get_points())
+                        if pts:
+                            out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
+                                dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                    elif bt=="ARC":
+                        nc=xf(be.dxf.center.x,be.dxf.center.y)
                         out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
                             start_angle=be.dxf.start_angle+math.degrees(rot),
                             end_angle=be.dxf.end_angle+math.degrees(rot),
                             dxfattribs={"layer":bl,"color":8})
-                        entity_count[0]+=1
-                elif bt=="CIRCLE":
-                    nc=xf(be.dxf.center.x,be.dxf.center.y)
-                    if in_bounds(nc[0],nc[1]):
+                    elif bt=="CIRCLE":
+                        nc=xf(be.dxf.center.x,be.dxf.center.y)
                         out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
                             dxfattribs={"layer":bl,"color":8})
-                        entity_count[0]+=1
-                elif bt=="SPLINE":
-                    spts=list(be.control_points)
-                    if spts:
-                        tpts=[xf(p[0],p[1]) for p in spts]
-                        cx=sum(p[0] for p in tpts)/len(tpts)
-                        cy=sum(p[1] for p in tpts)/len(tpts)
-                        if in_bounds(cx,cy):
-                            out_msp.add_lwpolyline(tpts,
+                    elif bt=="SPLINE":
+                        spts=list(be.control_points)
+                        if spts:
+                            out_msp.add_lwpolyline([xf(p[0],p[1]) for p in spts],
                                 dxfattribs={"layer":bl,"color":8})
-                            entity_count[0]+=1
-                elif bt=="INSERT":
-                    nix,niy=xf(be.dxf.insert.x,be.dxf.insert.y)
-                    if in_bounds(nix,niy):
-                        explode(be.dxf.name,nix,niy,
+                    elif bt=="INSERT":
+                        nix,niy=xf(be.dxf.insert.x,be.dxf.insert.y)
+                        explode_revit(be.dxf.name,nix,niy,
                             sx*getattr(be.dxf,'xscale',1.0),
                             sy*getattr(be.dxf,'yscale',1.0),
                             rot+math.radians(getattr(be.dxf,'rotation',0.0)),depth+1)
-            except: pass
+                except: pass
 
-    copied = 0
+        explode_fn = explode_revit
+
     for e in msp_m:
-        if entity_count[0]>MAX_ENTITIES: break
         try:
             layer=getattr(e.dxf,'layer','0')
             if layer in SKIP: continue
@@ -312,7 +360,6 @@ def process_files(uploaded_files):
                             (e.dxf.start.x,e.dxf.start.y),
                             (e.dxf.end.x,e.dxf.end.y),
                             dxfattribs={"layer":layer,"color":8})
-                        entity_count[0]+=1
                         placed=True
                 elif t=="LWPOLYLINE":
                     pts=list(e.get_points())
@@ -323,7 +370,6 @@ def process_files(uploaded_files):
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
                                 dxfattribs={"layer":layer,"color":8,
                                             "closed":e.is_closed})
-                            entity_count[0]+=1
                             placed=True
                 elif t=="ARC":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
@@ -332,14 +378,12 @@ def process_files(uploaded_files):
                             start_angle=e.dxf.start_angle,
                             end_angle=e.dxf.end_angle,
                             dxfattribs={"layer":layer,"color":8})
-                        entity_count[0]+=1
                         placed=True
                 elif t=="CIRCLE":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_circle(center=(cx,cy),radius=e.dxf.radius,
                             dxfattribs={"layer":layer,"color":8})
-                        entity_count[0]+=1
                         placed=True
                 elif t=="SPLINE":
                     pts=list(e.control_points)
@@ -349,12 +393,11 @@ def process_files(uploaded_files):
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
                                 dxfattribs={"layer":layer,"color":8})
-                            entity_count[0]+=1
                             placed=True
                 elif t=="INSERT":
                     cx,cy=e.dxf.insert.x,e.dxf.insert.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        explode(e.dxf.name,cx,cy,
+                        explode_fn(e.dxf.name,cx,cy,
                             getattr(e.dxf,'xscale',1.0),
                             getattr(e.dxf,'yscale',1.0),
                             math.radians(getattr(e.dxf,'rotation',0.0)))
@@ -389,7 +432,6 @@ def process_files(uploaded_files):
                             break
             except: pass
     else:
-        # Xref: find ground floor zone and correct X offset for labels
         ground_zone = max(zones, key=lambda z: (z[2]+z[3])/2)
         gx1,gx2,gy1,gy2 = ground_zone
         zone_x_center = (gx1+gx2)/2
@@ -426,7 +468,7 @@ def process_files(uploaded_files):
 
     out_path = tmp / "floor_plan_clean.dxf"
     out.saveas(str(out_path))
-    return out_path.read_bytes(), f"Done. {entity_count[0]} entities, {placed_labels} labels.", None
+    return out_path.read_bytes(), f"Done. {copied} entities, {placed_labels} labels.", None
 
 # ── CHAT UI ───────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
