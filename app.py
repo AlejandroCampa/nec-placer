@@ -65,7 +65,7 @@ def clean_mtext(txt):
 
 def sheet_score(name):
     n = name.lower()
-    if any(k in n for k in ["floor plan","ground","a101","a-1 ","a1 "]): return 2
+    if any(k in n for k in ["floor plan","ground","a101","a-1","a1"]): return 2
     if any(k in n for k in ["site","rcp","roof","ceiling","reflected"]): return 0
     return 1
 
@@ -412,9 +412,10 @@ def process_files(uploaded_files):
                             break
             except: pass
     else:
-        ground_zone=max(zones,key=lambda z:(z[2]+z[3])/2)
-        gx1,gx2,gy1,gy2=ground_zone
-        zone_x_center=(gx1+gx2)/2
+        # Use combined Y span of all zones for label matching
+        zone_x_center=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
+        all_y1=min(z[2] for z in zones)
+        all_y2=max(z[3] for z in zones)
         tl=[]
         for e in doc_a1.modelspace():
             try:
@@ -429,7 +430,8 @@ def process_files(uploaded_files):
                     if len(txt)<2: continue
                     mx,my=a1_to_master(ix,iy)
                     txt_rot=txt_rot-math.degrees(xref_rot)
-                    if gy1<=my<=gy2:
+                    # Use combined Y range and a tolerance buffer
+                    if (all_y1-500)<=my<=(all_y2+500):
                         tl.append((mx,my,txt,h*xref_sx,txt_rot))
             except: pass
         xc=0
