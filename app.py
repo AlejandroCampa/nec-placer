@@ -55,6 +55,20 @@ SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
                "SECT-3","SECT-4","AVE_RENDER"}
 
+RCP_FLOOR_LAYERS = {
+    "AP-WALL","AR-WALLS","A-WALL","WALL","Walls","A-WALL-FULL",
+    "A-FLOOR","A-FLOR","Floors","Floor",
+    "A-FURNITURE","Furniture","A-FURN",
+    "Plumbing Fixtures","Casework","A-MLWK",
+    "AP-DOOR","AP-door-m","AP-door-swing","AP-DOOR GLASS",
+    "AP-WINDOW","AP-WINDOW M","AP-WINDOW GLASS",
+    "A-GLAZ","Curtain Wall Panels","Curtain Wall Mullions",
+    "AP-STAIRS","Stairs","A-STAIR",
+    "AP-KITCHEN CABINETS","AP-MPFIXTURE",
+    "AP-RAILING","Railings","A-FLOR-HRAL",
+    "AP-POOL","AP-CONCRETE PAD","AP-CURB",
+}
+
 def clean_mtext(txt):
     txt = re.sub(r'\\f[^;]+;','',txt)
     txt = re.sub(r'\\[A-Za-z][^;]*;','',txt)
@@ -296,14 +310,14 @@ def process_files(uploaded_files):
                 except: pass
     else:
         def explode(bn,ix,iy,sx,sy,rot,d=0):
-            if d>3 or ec[0]>40000: return
+            if d>4 or ec[0]>60000: return
             if bn not in doc_m.blocks: return
             cr,sr=math.cos(rot),math.sin(rot)
             def xf(px,py):
                 lx,ly=px*sx,py*sy
                 return ix+lx*cr-ly*sr,iy+lx*sr+ly*cr
             for be in doc_m.blocks[bn]:
-                if ec[0]>40000: break
+                if ec[0]>60000: break
                 try:
                     bl=getattr(be.dxf,'layer','0')
                     if bl in SKIP: continue
@@ -451,7 +465,7 @@ def process_files(uploaded_files):
                     if rcp_ec[0]>30000: break
                     try:
                         bl=getattr(be.dxf,'layer','0')
-                        if bl in SKIP: continue
+                        if bl in SKIP or bl in RCP_FLOOR_LAYERS: continue
                         bt=be.dxftype()
                         if bt=="LINE":
                             out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
@@ -488,7 +502,7 @@ def process_files(uploaded_files):
             for e in msp_rcp:
                 try:
                     layer=getattr(e.dxf,'layer','0')
-                    if layer in SKIP: continue
+                    if layer in SKIP or layer in RCP_FLOOR_LAYERS: continue
                     t=e.dxftype()
                     for (X1,X2,Y1,Y2) in rcp_zones:
                         placed=False
