@@ -509,8 +509,8 @@ def process_files(uploaded_files):
         "A-ANNO-DIMS","A-ANNO-DIMS-96",
         "G-ANNO-NPLT","G-ANNO-TEXT","G-ANNO-SYMB",
         "G-ANNO-TTLB","G-ANNO-TTLB-WIDE","A-AREA-IDEN",
-        "A-DETL","A-DETL-HDLN","A-DETL-MBND",
-        "S-GRID","S-GRID-IDEN","A-COLS","S-COLS",
+        "A-DETL-HDLN","A-DETL-MBND",
+        "S-GRID","S-GRID-IDEN",
     }
     # Dedicated RCP layer: slightly heavier line so lights read clearly
     if "A-RCP" not in out.layers:
