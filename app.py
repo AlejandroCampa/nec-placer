@@ -457,11 +457,21 @@ def process_files(uploaded_files):
                     xc=zone_x_center-cx
                     for ix,iy,txt,h,txt_rot in cluster:
                         tl.append((ix+xc,iy,txt,h,txt_rot))
+        # Apply X correction to center labels over our zone
+        if tl:
+            avg_x=sum(mx for mx,my,t,h,r in tl)/len(tl)
+            xc=zone_x_center-avg_x
+        else:
+            xc=0
+        # Filter: only place labels within zone Y span (with buffer)
+        zone_y1=min(z[2] for z in zones)-500
+        zone_y2=max(z[3] for z in zones)+500
         for mx,my,txt,h,txt_rot in tl:
-            out_msp.add_text(txt[:50],dxfattribs={
-                "layer":"ROOM-LABELS","color":253,
-                "insert":(mx,my),"height":h,"rotation":txt_rot})
-            placed_labels+=1
+            if zone_y1<=my<=zone_y2:
+                out_msp.add_text(txt[:50],dxfattribs={
+                    "layer":"ROOM-LABELS","color":253,
+                    "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
+                placed_labels+=1
 
     # ── RCP ───────────────────────────────────────────────────────────────────
     if doc_m is not doc_a1:
