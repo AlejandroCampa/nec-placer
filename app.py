@@ -509,7 +509,10 @@ def process_files(uploaded_files):
         "G-ANNO-NPLT","G-ANNO-TEXT",
         "G-ANNO-TTLB","G-ANNO-TTLB-WIDE","A-AREA-IDEN",
     }
-    def is_ceiling_layer(n): return n not in RCP_SKIP_LAYERS
+    # Grid lines + bubbles: never fixture geometry, drop at leaf level
+    # even inside ceiling blocks. INSERTs are still always traversed.
+    RCP_GRID={"S-GRID","S-GRID-IDEN"}
+    def is_ceiling_layer(n): return n not in RCP_SKIP_LAYERS and n not in RCP_GRID
     floor_cx=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
     rcp_count=0
 
@@ -561,6 +564,7 @@ def process_files(uploaded_files):
                                 rot+math.radians(getattr(be.dxf,'rotation',0.0)),
                                 d+1,new_in)
                             continue
+                        if bl in RCP_GRID: continue
                         if not in_ceil and not is_ceiling_layer(bl): continue
                         if bt=="LINE":
                             out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
@@ -590,6 +594,7 @@ def process_files(uploaded_files):
                     layer=getattr(e.dxf,'layer','0')
                     if layer in SKIP: continue
                     t=e.dxftype()
+                    if t!="INSERT" and layer in RCP_GRID: continue
                     if t!="INSERT" and not is_ceiling_layer(layer): continue
                     def mirx(x): return 2*floor_cx-x
                     for (X1,X2,Y1,Y2) in rcp_zones:
