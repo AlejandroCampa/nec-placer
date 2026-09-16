@@ -143,16 +143,29 @@ def process_files(uploaded_files):
                     xref_rot=math.radians(getattr(e.dxf,'rotation',0.0))
                     break
         except: pass
+    debug_info=[]
     if xref_name:
-        st.write(f"DEBUG xref: name={xref_name} ix={xref_ix:.1f} iy={xref_iy:.1f} sx={xref_sx:.4f} rot={math.degrees(xref_rot):.2f}")
-        # Show first few label transforms
+        debug_info.append(f"xref: ix={xref_ix:.1f} iy={xref_iy:.1f} sx={xref_sx:.4f}")
+        txt_count=0; mtext_count=0; first_label=None
         for e in doc_a1.modelspace():
             try:
-                if e.dxftype()=="TEXT" and len(e.dxf.text.strip())>1:
-                    mx,my=a1_to_master(e.dxf.insert.x,e.dxf.insert.y)
-                    st.write(f"DEBUG label: '{e.dxf.text.strip()[:15]}' a1=({e.dxf.insert.x:.0f},{e.dxf.insert.y:.0f}) -> master=({mx:.0f},{my:.0f})")
-                    break
+                if e.dxftype()=="TEXT":
+                    txt_count+=1
+                    if first_label is None and len(e.dxf.text.strip())>1:
+                        mx,my=a1_to_master(e.dxf.insert.x,e.dxf.insert.y)
+                        first_label=f"TEXT '{e.dxf.text.strip()[:15]}' a1=({e.dxf.insert.x:.0f},{e.dxf.insert.y:.0f})->master=({mx:.0f},{my:.0f})"
+                elif e.dxftype()=="MTEXT":
+                    mtext_count+=1
+                    if first_label is None:
+                        try:
+                            txt=clean_mtext(e.text)
+                            if len(txt)>1:
+                                mx,my=a1_to_master(e.dxf.insert.x,e.dxf.insert.y)
+                                first_label=f"MTEXT '{txt[:15]}' a1=({e.dxf.insert.x:.0f},{e.dxf.insert.y:.0f})->master=({mx:.0f},{my:.0f})"
+                        except: pass
             except: pass
+        debug_info.append(f"A-1 text: {txt_count} TEXT {mtext_count} MTEXT")
+        if first_label: debug_info.append(first_label)
 
     def a1_to_master(ax,ay):
         dx=ax-xref_ix; dy=ay-xref_iy
@@ -630,6 +643,7 @@ def process_files(uploaded_files):
     out_path=tmp/"floor_plan_clean.dxf"
     out.saveas(str(out_path))
     msg=f"Done. {ec[0]} entities, {placed_labels} labels"
+    if debug_info: msg+=" | "+" | ".join(debug_info)
     if rcp_paths: msg+=f", RCP on layer A-RCP"
     return out_path.read_bytes(),msg+".",None
 
