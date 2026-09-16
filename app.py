@@ -208,11 +208,12 @@ def process_files(uploaded_files):
                    if sum(bands.get(b,0) for b in c)>=20 and sum(c)/len(c)<0]
             if valid:
                 best=max(valid,key=lambda c:sum(c)/len(c))
-                y1,y2=min(best)-300,max(best)+300
+                # Use wide Y range so transformed labels land inside zone
+                y1=min(best)-1500
+                y2=max(best)+1500
                 cy=(y1+y2)/2
                 # Only add if not already covered by existing zone
                 if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
-                    # Use tighter X bounds from viewport exactly
                     vp_x1=min(z[0] for z in zones)
                     vp_x2=max(z[1] for z in zones)
                     zones.append((vp_x1,vp_x2,y1,y2))
