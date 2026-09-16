@@ -280,14 +280,14 @@ def process_files(uploaded_files):
                 except: pass
     else:
         def explode(bn,ix,iy,sx,sy,rot,d=0):
-            if d>3 or ec[0]>40000: return
+            if d>5: return
             if bn not in doc_m.blocks: return
             cr,sr=math.cos(rot),math.sin(rot)
             def xf(px,py):
                 lx,ly=px*sx,py*sy
                 return ix+lx*cr-ly*sr,iy+lx*sr+ly*cr
             for be in doc_m.blocks[bn]:
-                if ec[0]>40000: break
+                
                 try:
                     bl=getattr(be.dxf,'layer','0')
                     if bl in SKIP: continue
