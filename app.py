@@ -498,7 +498,7 @@ def process_files(uploaded_files):
                 rcp_ec = [0]
 
                 def explode_rcp(bn, ix, iy, sx, sy, rot, d=0, in_ceil=False):
-                    if d > 3 or rcp_ec[0] > 30000: return
+                    if d > 5 or rcp_ec[0] > 30000: return
                     if bn not in doc_rcp.blocks: return
                     cr, sr = math.cos(rot), math.sin(rot)
                     def xf(px, py):
@@ -511,7 +511,19 @@ def process_files(uploaded_files):
                         try:
                             bl = getattr(be.dxf,'layer','0')
                             if bl in SKIP: continue
-                            # Once inside a ceiling block, include all sub-geometry
+                            bt = be.dxftype()
+                            # Always traverse INSERTs — ceiling fixtures can be
+                            # nested inside non-ceiling container blocks
+                            if bt == "INSERT":
+                                ni, nj = xf(be.dxf.insert.x, be.dxf.insert.y)
+                                new_in_ceil = in_ceil or is_ceiling_layer(bl)
+                                explode_rcp(be.dxf.name, ni, nj,
+                                    sx*getattr(be.dxf,'xscale',1.0),
+                                    sy*getattr(be.dxf,'yscale',1.0),
+                                    rot+math.radians(getattr(be.dxf,'rotation',0.0)),
+                                    d+1, new_in_ceil)
+                                continue
+                            # Only add geometry if we're inside a ceiling block
                             if not in_ceil and not is_ceiling_layer(bl): continue
                             bt = be.dxftype()
                             if bt == "LINE":
@@ -542,22 +554,16 @@ def process_files(uploaded_files):
                                     radius=be.dxf.radius*sx,
                                     dxfattribs={"layer":"A-RCP","color":9})
                                 rcp_ec[0] += 1
-                            elif bt == "INSERT":
-                                ni, nj = xf(be.dxf.insert.x,be.dxf.insert.y)
-                                # Pass in_ceil=True so sub-blocks include all geometry
-                                explode_rcp(be.dxf.name, ni, nj,
-                                    sx*getattr(be.dxf,'xscale',1.0),
-                                    sy*getattr(be.dxf,'yscale',1.0),
-                                    rot+math.radians(getattr(be.dxf,'rotation',0.0)),
-                                    d+1, in_ceil=in_ceil or is_ceiling_layer(bl))
+
                         except: pass
 
                 for e in msp_rcp:
                     try:
                         layer = getattr(e.dxf,'layer','0')
                         if layer in SKIP: continue
-                        if not is_ceiling_layer(layer): continue
                         t = e.dxftype()
+                        # For INSERTs: always follow. For geometry: check ceiling layer
+                        if t != "INSERT" and not is_ceiling_layer(layer): continue
                         def mirx(x): return 2*floor_cx - x
                         for (X1,X2,Y1,Y2) in rcp_zones:
                             placed = False
@@ -601,12 +607,11 @@ def process_files(uploaded_files):
                             elif t == "INSERT":
                                 cx,cy = e.dxf.insert.x,e.dxf.insert.y
                                 if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                    # in_ceil=True so all fixture sub-geometry is included
                                     explode_rcp(e.dxf.name,mirx(cx),cy,
                                         getattr(e.dxf,'xscale',1.0),
                                         getattr(e.dxf,'yscale',1.0),
                                         math.radians(getattr(e.dxf,'rotation',0.0)),
-                                        0, in_ceil=is_ceiling_layer(layer))
+                                        0, is_ceiling_layer(layer))
                                     placed = True
                             if placed:
                                 break
