@@ -5,6 +5,7 @@ import re
 import tempfile
 import subprocess
 import os
+import gc
 from pathlib import Path
 
 st.set_page_config(page_title="NEC Placer", layout="wide")
@@ -55,20 +56,16 @@ SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
                "SECT-3","SECT-4","AVE_RENDER"}
 
-# Layers to exclude from RCP (floor plan elements that shouldn't appear on ceiling)
-RCP_SKIP = set(SKIP) | {
-    "AP-WALL","AR-WALLS","A-WALL","WALL","Walls","A-WALL-FULL",
-    "A-FLOOR","A-FLOR","Floors","Floor",
-    "A-FURNITURE","Furniture","A-FURN",
-    "Plumbing Fixtures","Casework","A-MLWK",
-    "AP-DOOR","AP-door-m","AP-door-swing","AP-DOOR GLASS",
-    "AP-WINDOW","AP-WINDOW M","AP-WINDOW GLASS","A-GLAZ",
-    "Curtain Wall Panels","Curtain Wall Mullions",
-    "AP-STAIRS","Stairs","A-STAIR",
-    "AP-KITCHEN CABINETS","AP-MPFIXTURE",
-    "AP-RAILING","Railings","A-FLOR-HRAL",
-    "AP-POOL","AP-CONCRETE PAD","AP-CURB",
-}
+def is_ceiling_layer(name):
+    """Whitelist: only pass ceiling-specific layers into RCP"""
+    n = name.upper()
+    return any(k in n for k in [
+        "CEIL","CLNG","LIGHT","FIX","HVAC","MECH",
+        "SPRIN","FIRE","DIFFUS","VENT","RCP","RECESS",
+        "PEND","SUSP","TILE","GRID","FLUOR","LED",
+        "EXHAUST","SUPPLY","RETURN","DUCT","AIR",
+        "SMOKE","DETECT","ALARM","SPRINK",
+    ])
 
 def clean_mtext(txt):
     txt = re.sub(r'\\f[^;]+;','',txt)
@@ -131,31 +128,30 @@ def process_files(uploaded_files):
 
     dxf_stems = {p.stem.lower() for p in dxf_paths}
 
-    # Identify RCP files separately — keep them out of floor plan detection
+    # Separate RCP from floor plan files
     rcp_paths = [p for p in dxf_paths if is_rcp(p.name)]
     floor_paths = [p for p in dxf_paths if not is_rcp(p.name)]
     if not floor_paths:
         floor_paths = dxf_paths
 
-    # Scan floor plan files only
+    # Scan floor files cheaply, free each immediately
     file_meta = []
     for p in floor_paths:
         has_vp, walls, xref = quick_scan(p)
         file_meta.append((p, has_vp, walls, xref))
+    gc.collect()  # Clean up after scans
 
     if not file_meta:
         return None, None, "Could not read any files."
 
-    # Pick sheet
     candidates = [(p,vp,w) for p,vp,w,_ in file_meta if vp]
     if not candidates:
         candidates = [(p,vp,w) for p,vp,w,_ in file_meta]
     sheet_path = max(candidates, key=lambda x: sheet_score(x[0].name))[0]
 
-    # Load sheet
+    # Load only what we need
     doc_a1 = ezdxf.readfile(str(sheet_path))
 
-    # Find xref
     xref_name=None; xref_ix=xref_iy=0.0; xref_sx=xref_sy=1.0; xref_rot=0.0
     for e in doc_a1.modelspace():
         try:
@@ -206,7 +202,6 @@ def process_files(uploaded_files):
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
             except: pass
 
-    # Wall cluster for xref
     if xref_name and zones:
         lot_x1=min(z[0] for z in zones); lot_x2=max(z[1] for z in zones)
         covered_y1=min(z[2] for z in zones); covered_y2=max(z[3] for z in zones)
@@ -249,7 +244,7 @@ def process_files(uploaded_files):
     out_msp=out.modelspace()
     ec=[0]
 
-    # ── FLOOR PLAN EXTRACTION (exact same as working version) ─────────────────
+    # ── EXACT WORKING FLOOR PLAN EXTRACTION ───────────────────────────────────
     if xref_name:
         def ib(cx,cy): return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
         def explode(bn,ix,iy,sx,sy,rot,d=0):
@@ -471,14 +466,17 @@ def process_files(uploaded_files):
                 "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
             placed_labels+=1
 
-    # ── RCP: pure addition, does not touch floor plan above ───────────────────
+    # Free floor plan memory before RCP
+    del doc_m, doc_a1, msp_m
+    gc.collect()
+
+    # ── RCP: whitelist-only ceiling layers, mirrored ──────────────────────────
     rcp_count=0
     for rcp_path in rcp_paths:
         try:
             doc_rcp=ezdxf.readfile(str(rcp_path))
             msp_rcp=doc_rcp.modelspace()
 
-            # Get RCP viewport zone
             rcp_zones=[]
             for layout in doc_rcp.layouts:
                 if layout.name=="Model": continue
@@ -516,7 +514,8 @@ def process_files(uploaded_files):
                     if rcp_ec[0]>30000: break
                     try:
                         bl=getattr(be.dxf,'layer','0')
-                        if bl in RCP_SKIP: continue
+                        if bl in SKIP: continue
+                        if not is_ceiling_layer(bl): continue
                         bt=be.dxftype()
                         if bt=="LINE":
                             out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
@@ -553,18 +552,19 @@ def process_files(uploaded_files):
             for e in msp_rcp:
                 try:
                     layer=getattr(e.dxf,'layer','0')
-                    if layer in RCP_SKIP: continue
+                    if layer in SKIP: continue
+                    if not is_ceiling_layer(layer): continue
                     t=e.dxftype()
                     for (X1,X2,Y1,Y2) in rcp_zones:
                         placed=False
-                        def mx(x): return 2*floor_cx-x
+                        def mirx(x): return 2*floor_cx-x
                         if t=="LINE":
                             cx=(e.dxf.start.x+e.dxf.end.x)/2
                             cy=(e.dxf.start.y+e.dxf.end.y)/2
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
                                 out_msp.add_line(
-                                    (mx(e.dxf.start.x),e.dxf.start.y),
-                                    (mx(e.dxf.end.x),e.dxf.end.y),
+                                    (mirx(e.dxf.start.x),e.dxf.start.y),
+                                    (mirx(e.dxf.end.x),e.dxf.end.y),
                                     dxfattribs={"layer":"A-RCP","color":9})
                                 placed=True
                         elif t=="LWPOLYLINE":
@@ -574,7 +574,7 @@ def process_files(uploaded_files):
                                 cy=sum(p[1] for p in pts)/len(pts)
                                 if X1<=cx<=X2 and Y1<=cy<=Y2:
                                     out_msp.add_lwpolyline(
-                                        [(mx(p[0]),p[1]) for p in pts],
+                                        [(mirx(p[0]),p[1]) for p in pts],
                                         dxfattribs={"layer":"A-RCP","color":9,"closed":e.is_closed})
                                     placed=True
                         elif t=="ARC":
@@ -582,20 +582,20 @@ def process_files(uploaded_files):
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
                                 sa=(180-e.dxf.end_angle)%360
                                 ea=(180-e.dxf.start_angle)%360
-                                out_msp.add_arc(center=(mx(cx),cy),radius=e.dxf.radius,
+                                out_msp.add_arc(center=(mirx(cx),cy),radius=e.dxf.radius,
                                     start_angle=sa,end_angle=ea,
                                     dxfattribs={"layer":"A-RCP","color":9})
                                 placed=True
                         elif t=="CIRCLE":
                             cx,cy=e.dxf.center.x,e.dxf.center.y
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                out_msp.add_circle(center=(mx(cx),cy),radius=e.dxf.radius,
+                                out_msp.add_circle(center=(mirx(cx),cy),radius=e.dxf.radius,
                                     dxfattribs={"layer":"A-RCP","color":9})
                                 placed=True
                         elif t=="INSERT":
                             cx,cy=e.dxf.insert.x,e.dxf.insert.y
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                explode_rcp(e.dxf.name,mx(cx),cy,
+                                explode_rcp(e.dxf.name,mirx(cx),cy,
                                     getattr(e.dxf,'xscale',1.0),
                                     getattr(e.dxf,'yscale',1.0),
                                     math.radians(getattr(e.dxf,'rotation',0.0)))
@@ -606,13 +606,14 @@ def process_files(uploaded_files):
                 except: pass
 
             del doc_rcp
+            gc.collect()
         except Exception as ex:
             st.write(f"RCP error: {ex}")
 
     out_path=tmp/"floor_plan_clean.dxf"
     out.saveas(str(out_path))
     msg=f"Done. {ec[0]} entities, {placed_labels} labels"
-    if rcp_paths: msg+=f", {rcp_count} RCP entities (mirrored, layer A-RCP)"
+    if rcp_paths: msg+=f", {rcp_count} RCP ceiling entities (layer A-RCP)"
     return out_path.read_bytes(),msg+".",None
 
 # CHAT UI
