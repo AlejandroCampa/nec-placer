@@ -46,7 +46,8 @@ def dwg_to_dxf(dwg_path: Path) -> Path:
 SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
-        "north","SITE","TABLE","TABLEDATA","TABLELN"]
+        "north","SITE","TABLE","TABLEDATA","TABLELN",
+        "S-GRID","S-GRID-IDEN","A-ANNO-DIMS","A-ANNO-DIMS-96"]
 
 SKIP_BLOCKS = {"*","AME_NIL","AME_SOL","FLECHA-X","2-TIT360",
                "ELE1","ELE2","ELE3","ELE4","SECT-1","SECT-2",
@@ -506,9 +507,14 @@ def process_files(uploaded_files):
         "A-WALL","A-WALL-PATT","A-FLOR",
         "A-GLAZ-CURT","A-GLAZ-CWMG","I-WALL",
         "A-ANNO-DIMS","A-ANNO-DIMS-96",
-        "G-ANNO-NPLT","G-ANNO-TEXT",
+        "G-ANNO-NPLT","G-ANNO-TEXT","G-ANNO-SYMB",
         "G-ANNO-TTLB","G-ANNO-TTLB-WIDE","A-AREA-IDEN",
+        "A-DETL","A-DETL-HDLN","A-DETL-MBND",
+        "S-GRID","S-GRID-IDEN","A-COLS","S-COLS",
     }
+    # Dedicated RCP layer: slightly heavier line so lights read clearly
+    if "A-RCP" not in out.layers:
+        out.layers.new("A-RCP", dxfattribs={"color":9,"lineweight":30})
     def is_ceiling_layer(n): return n not in RCP_SKIP_LAYERS
     floor_cx=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
     rcp_count=0
@@ -565,24 +571,24 @@ def process_files(uploaded_files):
                         if bt=="LINE":
                             out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
                                 xf(be.dxf.end.x,be.dxf.end.y),
-                                dxfattribs={"layer":"A-RCP","color":9})
+                                dxfattribs={"layer":"A-RCP","color":9,"lineweight":30})
                             rcp_ec[0]+=1
                         elif bt=="LWPOLYLINE":
                             pts=list(be.get_points())
                             if pts:
                                 out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
-                                    dxfattribs={"layer":"A-RCP","color":9,"closed":be.is_closed})
+                                    dxfattribs={"layer":"A-RCP","color":9,"lineweight":30,"closed":be.is_closed})
                                 rcp_ec[0]+=1
                         elif bt=="ARC":
                             nc=xf(be.dxf.center.x,be.dxf.center.y)
                             sa=(180-be.dxf.end_angle)%360; ea=(180-be.dxf.start_angle)%360
                             out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
                                 start_angle=sa,end_angle=ea,
-                                dxfattribs={"layer":"A-RCP","color":9})
+                                dxfattribs={"layer":"A-RCP","color":9,"lineweight":30})
                             rcp_ec[0]+=1
                         elif bt=="CIRCLE":
                             out_msp.add_circle(center=xf(be.dxf.center.x,be.dxf.center.y),
-                                radius=be.dxf.radius*sx,dxfattribs={"layer":"A-RCP","color":9})
+                                radius=be.dxf.radius*sx,dxfattribs={"layer":"A-RCP","color":9,"lineweight":30})
                             rcp_ec[0]+=1
                     except: pass
             for e in msp_rcp:
@@ -600,7 +606,7 @@ def process_files(uploaded_files):
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
                                 out_msp.add_line((mirx(e.dxf.start.x),e.dxf.start.y),
                                     (mirx(e.dxf.end.x),e.dxf.end.y),
-                                    dxfattribs={"layer":"A-RCP","color":9})
+                                    dxfattribs={"layer":"A-RCP","color":9,"lineweight":30})
                                 placed=True
                         elif t=="LWPOLYLINE":
                             pts=list(e.get_points())
@@ -609,7 +615,7 @@ def process_files(uploaded_files):
                                 cy=sum(p[1] for p in pts)/len(pts)
                                 if X1<=cx<=X2 and Y1<=cy<=Y2:
                                     out_msp.add_lwpolyline([(mirx(p[0]),p[1]) for p in pts],
-                                        dxfattribs={"layer":"A-RCP","color":9,"closed":e.is_closed})
+                                        dxfattribs={"layer":"A-RCP","color":9,"lineweight":30,"closed":e.is_closed})
                                     placed=True
                         elif t=="ARC":
                             cx,cy=e.dxf.center.x,e.dxf.center.y
@@ -617,13 +623,13 @@ def process_files(uploaded_files):
                                 sa=(180-e.dxf.end_angle)%360; ea=(180-e.dxf.start_angle)%360
                                 out_msp.add_arc(center=(mirx(cx),cy),radius=e.dxf.radius,
                                     start_angle=sa,end_angle=ea,
-                                    dxfattribs={"layer":"A-RCP","color":9})
+                                    dxfattribs={"layer":"A-RCP","color":9,"lineweight":30})
                                 placed=True
                         elif t=="CIRCLE":
                             cx,cy=e.dxf.center.x,e.dxf.center.y
                             if X1<=cx<=X2 and Y1<=cy<=Y2:
                                 out_msp.add_circle(center=(mirx(cx),cy),radius=e.dxf.radius,
-                                    dxfattribs={"layer":"A-RCP","color":9})
+                                    dxfattribs={"layer":"A-RCP","color":9,"lineweight":30})
                                 placed=True
                         elif t=="INSERT":
                             cx,cy=e.dxf.insert.x,e.dxf.insert.y
