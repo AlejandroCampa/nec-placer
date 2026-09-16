@@ -457,15 +457,16 @@ def process_files(uploaded_files):
                     xc=zone_x_center-cx
                     for ix,iy,txt,h,txt_rot in cluster:
                         tl.append((ix+xc,iy,txt,h,txt_rot))
-        # Apply X correction to center labels over our zone
-        if tl:
-            avg_x=sum(mx for mx,my,t,h,r in tl)/len(tl)
+        # Compute X correction only from labels within zone Y range
+        # (avoids title block / dimension text pulling avg_x off)
+        zone_y1=min(z[2] for z in zones)-500
+        zone_y2=max(z[3] for z in zones)+500
+        in_zone=[item for item in tl if zone_y1<=item[1]<=zone_y2]
+        if in_zone:
+            avg_x=sum(mx for mx,my,t,h,r in in_zone)/len(in_zone)
             xc=zone_x_center-avg_x
         else:
             xc=0
-        # Filter: only place labels within zone Y span (with buffer)
-        zone_y1=min(z[2] for z in zones)-500
-        zone_y2=max(z[3] for z in zones)+500
         for mx,my,txt,h,txt_rot in tl:
             if zone_y1<=my<=zone_y2:
                 out_msp.add_text(txt[:50],dxfattribs={
