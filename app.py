@@ -457,16 +457,23 @@ def process_files(uploaded_files):
                     xc=zone_x_center-cx
                     for ix,iy,txt,h,txt_rot in cluster:
                         tl.append((ix+xc,iy,txt,h,txt_rot))
-        # Compute X correction only from labels within zone Y range
-        # (avoids title block / dimension text pulling avg_x off)
+        # DEBUG: show what labels we found and what correction we compute
         zone_y1=min(z[2] for z in zones)-500
         zone_y2=max(z[3] for z in zones)+500
+        st.write(f"DEBUG zones: {[(round(z[0]),round(z[1]),round(z[2]),round(z[3])) for z in zones]}")
+        st.write(f"DEBUG zone_y1={zone_y1:.0f} zone_y2={zone_y2:.0f} zone_x_center={zone_x_center:.0f}")
+        st.write(f"DEBUG tl count: {len(tl)}")
+        for i,(mx,my,txt,h,r) in enumerate(tl[:10]):
+            st.write(f"DEBUG tl[{i}]: '{txt[:20]}' mx={mx:.0f} my={my:.0f}")
         in_zone=[item for item in tl if zone_y1<=item[1]<=zone_y2]
+        st.write(f"DEBUG in_zone count: {len(in_zone)}")
         if in_zone:
             avg_x=sum(mx for mx,my,t,h,r in in_zone)/len(in_zone)
             xc=zone_x_center-avg_x
+            st.write(f"DEBUG avg_x={avg_x:.0f} xc={xc:.0f}")
         else:
             xc=0
+            st.write("DEBUG: in_zone empty, xc=0")
         for mx,my,txt,h,txt_rot in tl:
             if zone_y1<=my<=zone_y2:
                 out_msp.add_text(txt[:50],dxfattribs={
