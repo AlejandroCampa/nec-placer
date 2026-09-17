@@ -654,8 +654,107 @@ def process_files(uploaded_files):
                     vp_x2=max(z[1] for z in zones)
                     zones.append((vp_x1,vp_x2,y1,y2))
 
+    # ── Zone refinement: hone in on the building(s), not the whole sheet ────
+    # 1. wall midpoints (any WALL/MURO/PARED layer, top level + 2 block levels)
+    wall_pts=[]
+    for ve,_ in iter_leaves(msp_m,doc_m,2,skip=set(SKIP)):
+        if len(wall_pts)>=200000: break
+        try:
+            lay=getattr(ve.dxf,'layer','').upper()
+            if not any(k in lay for k in ("WALL","MURO","PARED")): continue
+            g=leaf_geom(ve,1.0)
+            if g and g[0] in ("line","poly"): wall_pts.append(geom_mid(g))
+        except: pass
+    if len(wall_pts)<15:      # no recognisable wall layers → every line is structure
+        wall_pts=[]
+        for ve,_ in iter_leaves(msp_m,doc_m,2,skip=set(SKIP)):
+            if len(wall_pts)>=200000: break
+            try:
+                g=leaf_geom(ve,1.0)
+                if g and g[0]=="line": wall_pts.append(geom_mid(g))
+            except: pass
+    def _bb(pts):
+        xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
+        return (min(xs),max(xs),min(ys),max(ys))
+    def _inside(z,p): return z[0]<=p[0]<=z[1] and z[2]<=p[1]<=z[3]
+    def _area(z): return max(1e-9,(z[1]-z[0])*(z[3]-z[2]))
+    def _contains(a,b):
+        tx=0.02*(a[1]-a[0]); ty=0.02*(a[3]-a[2])
+        return a[0]-tx<=b[0] and b[1]<=a[1]+tx and a[2]-ty<=b[2] and b[3]<=a[3]+ty
+    def _cluster_walls(pts):
+        bx=_bb(pts); ext=max(bx[1]-bx[0],bx[3]-bx[2],1.0); cell=ext/60.0
+        bins={}
+        for p in pts:
+            k=(int((p[0]-bx[0])/cell),int((p[1]-bx[2])/cell)); bins.setdefault(k,[]).append(p)
+        seen=set(); comps=[]
+        for k in bins:
+            if k in seen: continue
+            stack=[k]; seen.add(k); comp=[]
+            while stack:
+                cx_,cy_=stack.pop(); comp.extend(bins[(cx_,cy_)])
+                for dx in (-1,0,1):
+                    for dy in (-1,0,1):
+                        nk=(cx_+dx,cy_+dy)
+                        if nk in bins and nk not in seen: seen.add(nk); stack.append(nk)
+            if len(comp)>=20: comps.append(comp)
+        comps.sort(key=len,reverse=True)
+        if not comps: return []
+        top=len(comps[0]); out=[]
+        for comp in comps[:6]:
+            if len(comp)<0.25*top: break
+            b=_bb(comp); px=0.10*(b[1]-b[0]); py=0.10*(b[3]-b[2])
+            out.append((b[0]-px,b[1]+px,b[2]-py,b[3]+py))
+        return out
+
+    n_before=len([z for z in zones if z[0]>-1e8 and z[1]<1e8])
+    cand=[z for z in zones if z[0]>-1e8 and z[1]<1e8]
+    scored=[(z,sum(1 for p in wall_pts if _inside(z,p))) for z in cand]
+    scored=[(z,n) for z,n in scored if n>=15]                 # drop elevations/sections/details
+    keep=[]
+    for z,n in scored:                                        # drop site/overall views
+        container=any(z2 is not z and _contains(z,z2) and n2>=0.6*n for z2,n2 in scored)
+        if not container: keep.append((z,n))
+    dedup=[]
+    for z,n in sorted(keep,key=lambda t:_area(t[0])):         # near-duplicates → keep tighter
+        if not any(_contains(z2,z) and _area(z)>0.8*_area(z2) for z2,_ in dedup): dedup.append((z,n))
+    zones=[z for z,_ in dedup]
+    if not zones and wall_pts:
+        zones=_cluster_walls(wall_pts)
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
+    # Tighten only when this is NOT the simple known-good case: i.e. we had to
+    # throw viewports away (multi-view sheet), or a lone viewport is a bare site
+    # plan (≥10× the building). A single framed viewport, or viewport +
+    # wall-cluster, is left exactly as it was.
+    dropped=n_before>len(zones)
+    tight=[]
+    for z in zones:
+        pts=[p for p in wall_pts if _inside(z,p)]
+        if len(pts)>=15:
+            b=_bb(pts)
+            if dropped or _area(b)<0.10*_area(z):
+                px=0.15*(b[1]-b[0]); py=0.15*(b[3]-b[2])
+                z=(b[0]-px,b[1]+px,b[2]-py,b[3]+py)
+        tight.append(z)
+    zones=tight
+    zone_note=f"{len(zones)} floor zone(s), {len(wall_pts)} wall segs"
+    zone_wbox=[]
+    for z in zones:
+        pts=[p for p in wall_pts if _inside(z,p)]
+        zone_wbox.append(_bb(pts) if len(pts)>=15 else z)
+    def looks_like_grid(g):
+        """Axis-aligned line spanning ≥85% of the building in its direction
+        and extending past the wall envelope: a grid line regardless of layer."""
+        if g[0]!="line": return False
+        (x1,y1),(x2,y2)=g[1],g[2]; dx,dy=abs(x2-x1),abs(y2-y1)
+        for wb in zone_wbox:
+            wx=wb[1]-wb[0]; wy=wb[3]-wb[2]
+            if wx<=0 or wy<=0: continue
+            if dy<=0.02*max(dx,1) and dx>=0.85*wx:
+                if wb[2]<=y1<=wb[3] and (min(x1,x2)<wb[0]-0.05*wx or max(x1,x2)>wb[1]+0.05*wx): return True
+            if dx<=0.02*max(dy,1) and dy>=0.85*wy:
+                if wb[0]<=x1<=wb[1] and (min(y1,y2)<wb[2]-0.05*wy or max(y1,y2)>wb[3]+0.05*wy): return True
+        return False
 
     zone_x_center=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
     all_x1=min(z[0] for z in zones)-200; all_x2=max(z[1] for z in zones)+200
@@ -704,7 +803,8 @@ def process_files(uploaded_files):
             g=leaf_geom(ve,flat)
             if g is None: continue
             et="LWPOLYLINE" if g[0]=="poly" else ("CIRCLE" if g[0]=="circle" else ("ARC" if g[0]=="arc" else "LINE"))
-            if is_grid_layer(layer):
+            if is_grid_layer(layer) or looks_like_grid(g):
+                layer="S-GRID"
                 # grid lines run past the plan; bubbles sit just outside it
                 ok = bbox_hits(geom_bbox(g)) if g[0] in ("line","poly") else inzone(*g[1],ezones)
             else:
@@ -795,7 +895,7 @@ def process_files(uploaded_files):
         # then shift that avg to zone center — works for both ground floor and basement
         for (X1,X2,Y1,Y2) in zones:
             zone_cx=(X1+X2)/2
-            zone_buf=300
+            zone_buf=max(300.0,0.2*(Y2-Y1))
             zone_lbls=[it for it in tl if (Y1-zone_buf)<=it[1]<=(Y2+zone_buf)]
             if not zone_lbls: continue
             avg_mx=sum(it[0] for it in zone_lbls)/len(zone_lbls)
@@ -985,7 +1085,7 @@ def process_files(uploaded_files):
     dxf_bytes=out_path.read_bytes()
     dwg_path=dxf_to_dwg(out_path)
     dwg_bytes=dwg_path.read_bytes() if dwg_path else None
-    msg=f"Done. {ec[0]+copied} entities, {placed_labels} labels"
+    msg=f"Done. {ec[0]+copied} entities, {placed_labels} labels, {zone_note}"
     if not dwg_bytes: msg+=" (DWG conversion failed — DXF only)"
     if debug_info: msg+=" | "+" | ".join(debug_info)
     if rcp_names: msg+=f", RCP on layer A-RCP from {'; '.join(rcp_names)}"
