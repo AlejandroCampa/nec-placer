@@ -70,6 +70,61 @@ def clean_mtext(txt):
     txt = re.sub(r'\\U\+[0-9A-Fa-f]+','',txt)
     return txt.replace('\\P',' ').replace('\\~',' ').strip()
 
+# ── Output layer scheme (AIA-style, colors BYLAYER) ────────────────────────
+OUT_LAYERS = {
+    # name          (color, linetype,     lineweight)
+    "A-WALL":       (8,  "Continuous", 35),
+    "A-DOOR":       (9,  "Continuous", 18),
+    "A-GLAZ":       (9,  "Continuous", 18),
+    "A-COLS":       (8,  "Continuous", 25),
+    "A-STAIR":      (9,  "Continuous", 18),
+    "A-FURN":       (9,  "Continuous", 13),
+    "A-FLOR":       (9,  "Continuous", 13),
+    "A-PATT":       (9,  "Continuous", 9),
+    "A-GENM":       (9,  "Continuous", 13),
+    "A-CLNG":       (9,  "Continuous", 13),
+    "S-GRID":       (8,  "CENTER",     13),
+    "S-GRID-IDEN":  (8,  "Continuous", 13),
+    "A-ANNO-TEXT":  (8,  "Continuous", 13),
+    "A-RCP":        (9,  "Continuous", 13),
+    "E-ANNO-TITL":  (7,  "Continuous", 35),
+    "E-ANNO-TTLB":  (7,  "Continuous", 35),
+    "E-ANNO-TEXT":  (7,  "Continuous", 18),
+    "E-SYMB":       (7,  "Continuous", 25),
+    "E-POWR-DEVC":  (7,  "Continuous", 35),
+    "E-POWR-CIRC":  (2,  "Continuous", 25),
+    "E-LITE-FIXT":  (7,  "Continuous", 35),
+    "E-LITE-CIRC":  (2,  "Continuous", 25),
+    "E-COMM-DEVC":  (7,  "Continuous", 35),
+    "E-COMM-CIRC":  (2,  "Continuous", 25),
+    "E-PANL":       (7,  "Continuous", 50),
+    "DEFPOINTS":    (7,  "Continuous", 0),
+}
+
+def is_grid_layer(name):
+    u = name.upper()
+    return "GRID" in u or u in ("EJE","EJES","A-EJES","EJES-ARQ")
+
+def map_layer(src, et="LINE"):
+    """Source layer → consolidated output layer."""
+    u = src.upper()
+    if is_grid_layer(u):
+        return "S-GRID" if et in ("LINE","LWPOLYLINE","SPLINE") else "S-GRID-IDEN"
+    if "PATT" in u or "HATCH" in u:                       return "A-PATT"
+    if any(k in u for k in ("WALL","MURO","PARED")):      return "A-WALL"
+    if any(k in u for k in ("DOOR","PUERTA")):            return "A-DOOR"
+    if any(k in u for k in ("WINDOW","VENTANA","GLAZ","CURT")): return "A-GLAZ"
+    if any(k in u for k in ("COLS","COLUMN","COLUMNA")):  return "A-COLS"
+    if any(k in u for k in ("STAIR","ESCAL","RAIL")):     return "A-STAIR"
+    if any(k in u for k in ("FURN","MUEBLE","CASEWORK","MLWK","CABINET",
+                            "EQPM","PLUMB","FIXT","SANIT")): return "A-FURN"
+    if any(k in u for k in ("FLOR","FLOOR","PISO")):      return "A-FLOR"
+    if any(k in u for k in ("CLNG","CEIL","LITE","LIGHT")): return "A-CLNG"
+    return "A-GENM"
+
+def text_layer(src):
+    return "S-GRID-IDEN" if is_grid_layer(src) else "A-ANNO-TEXT"
+
 def sheet_score(name):
     n = name.lower()
     if any(k in n for k in ["floor plan","ground","a101","a-1"]): return 2
@@ -132,6 +187,204 @@ def quick_scan(p):
         return has_vp, walls, xref, ceil, total, rcp_txt
     except:
         return False, 0, None, 0, 0, False
+
+# ── Standard scales ─────────────────────────────────────────────────────────
+IMP_SCALES=[(12,'1"=1\'-0"'),(16,'3/4"=1\'-0"'),(24,'1/2"=1\'-0"'),(32,'3/8"=1\'-0"'),
+            (48,'1/4"=1\'-0"'),(64,'3/16"=1\'-0"'),(96,'1/8"=1\'-0"'),(128,'3/32"=1\'-0"'),
+            (192,'1/16"=1\'-0"'),(384,'1/32"=1\'-0"'),(768,'1/64"=1\'-0"')]
+MET_SCALES=[(20,'1:20'),(25,'1:25'),(50,'1:50'),(75,'1:75'),(100,'1:100'),(125,'1:125'),
+            (150,'1:150'),(200,'1:200'),(250,'1:250'),(500,'1:500'),(1000,'1:1000')]
+UNIT_PER_IN={1:1.0, 2:12.0, 4:25.4, 5:2.54, 6:0.0254}   # $INSUNITS → model units per inch
+
+def pick_scale(need, ins_units):
+    metric = ins_units in (4,5,6)
+    table = MET_SCALES if metric else IMP_SCALES
+    for F,label in table:
+        if F>=need: return F,label
+    F=need*1.05
+    return F, f"1:{int(round(F))}"
+
+def build_project(out, zones, ins_units, project, has_rcp):
+    """Turn the cleaned model into a job: floor blocks, discipline copies,
+    paper-space sheets with title blocks + viewports, legend sheet."""
+    import datetime
+    msp=out.modelspace()
+    date_str=datetime.date.today().strftime("%m/%d/%Y")
+    u_per_in=UNIT_PER_IN.get(ins_units,1.0)
+    units_known=ins_units in UNIT_PER_IN
+
+    # 1. One block per floor; route every model entity into its floor block
+    order=sorted(range(len(zones)), key=lambda i:-(zones[i][2]+zones[i][3])/2)
+    names={zi:f"PLAN-{chr(65+k)}" for k,zi in enumerate(order)}
+    fblk={zi:out.blocks.new(f"ARCH-{names[zi]}") for zi in order}
+    rblk={zi:out.blocks.new(f"RCP-{names[zi]}")  for zi in order}
+    for zi in order:
+        X1,X2,Y1,Y2=zones[zi]
+        fblk[zi].block.dxf.base_point=(X1,Y1,0)
+        rblk[zi].block.dxf.base_point=(X1,Y1,0)
+
+    def ref_pt(e):
+        t=e.dxftype()
+        try:
+            if t=="LINE":   return ((e.dxf.start.x+e.dxf.end.x)/2,(e.dxf.start.y+e.dxf.end.y)/2)
+            if t in ("ARC","CIRCLE"): return (e.dxf.center.x,e.dxf.center.y)
+            if t in ("TEXT","MTEXT","INSERT"): return (e.dxf.insert.x,e.dxf.insert.y)
+            if t=="LWPOLYLINE":
+                pts=list(e.get_points())
+                return (sum(p[0] for p in pts)/len(pts),sum(p[1] for p in pts)/len(pts))
+        except: pass
+        return None
+    def zone_of(x,y):
+        for zi in order:
+            X1,X2,Y1,Y2=zones[zi]
+            if X1<=x<=X2 and Y1<=y<=Y2: return zi
+        return min(order,key=lambda zi:abs((zones[zi][2]+zones[zi][3])/2-y))
+    for e in list(msp):
+        p=ref_pt(e)
+        if p is None: continue
+        zi=zone_of(*p)
+        tgt = rblk[zi] if e.dxf.layer=="A-RCP" else fblk[zi]
+        msp.move_to_layout(e,tgt)
+
+    # 2. Discipline copies side by side in model space
+    DISC=[("POWER","1"),("LIGHTING","2"),("TELECOM","3")]
+    W=max(z[1]-z[0] for z in zones); H=max(z[3]-z[2] for z in zones)
+    gapx=W*0.15; gapy=H*0.30; th=max(H*0.025,1.0)
+    copies={}   # (zi,disc) -> (cx,cy)
+    for r,zi in enumerate(order):
+        X1,X2,Y1,Y2=zones[zi]; w=X2-X1; h=Y2-Y1
+        for col,(dname,_) in enumerate(DISC):
+            ox=col*(W+gapx); oy=-r*(H+gapy)
+            msp.add_blockref(fblk[zi].name,(ox,oy))
+            if dname=="LIGHTING" and has_rcp:
+                msp.add_blockref(rblk[zi].name,(ox,oy))
+            msp.add_text(f"{dname} PLAN - {names[zi]}",dxfattribs={
+                "layer":"E-ANNO-TITL","color":256,"insert":(ox,oy+h+th),"height":th})
+            copies[(zi,dname)]=(ox+w/2,oy+h/2,w,h)
+
+    # 3. Paper space: ARCH D landscape, border + title strip + viewport
+    PW,PH,M,TB=36.0,24.0,0.5,3.5
+    def sheet(num,title,scale_label="",vp=None):
+        lay=out.layouts.new(num)
+        lay.page_setup(size=(PW,PH),margins=(0,0,0,0),units="inch")
+        L="E-ANNO-TTLB"; T="E-ANNO-TEXT"
+        lay.add_lwpolyline([(M,M),(PW-M,M),(PW-M,PH-M),(M,PH-M)],close=True,dxfattribs={"layer":L,"color":256})
+        sx=PW-M-TB
+        lay.add_line((sx,M),(sx,PH-M),dxfattribs={"layer":L,"color":256})
+        rows=[PH-M-3.0, PH-M-6.5, PH-M-9.0, PH-M-11.5, PH-M-14.0, PH-M-16.5, M+3.0]
+        for y in rows: lay.add_line((sx,y),(PW-M,y),dxfattribs={"layer":L,"color":256})
+        def tx(s,x,y,h=0.12,lay_=T):
+            lay.add_text(s,dxfattribs={"layer":lay_,"color":256,"insert":(x,y),"height":h})
+        x0=sx+0.15
+        tx("FIRM / LOGO",x0,PH-M-1.6,0.18)
+        tx("PROJECT",x0,PH-M-3.4,0.10);        tx(project[:34].upper(),x0,PH-M-4.6,0.16)
+        tx("SHEET TITLE",x0,PH-M-6.9,0.10);    tx(title,x0,PH-M-8.1,0.16)
+        tx("DATE",x0,PH-M-9.4,0.10);           tx(date_str,x0,PH-M-10.4,0.14)
+        tx("SCALE",x0,PH-M-11.9,0.10);         tx(scale_label or "AS NOTED",x0,PH-M-12.9,0.14)
+        tx("DRAWN BY",x0,PH-M-14.4,0.10);      tx("________",x0,PH-M-15.4,0.14)
+        tx("CHECKED BY",x0,PH-M-16.9,0.10);    tx("________",x0,PH-M-17.9,0.14)
+        tx("SHEET NO.",x0,M+2.4,0.10);         tx(num.split(" ")[0],x0,M+0.9,0.55,"E-ANNO-TITL")
+        if vp:
+            cx,cy,w,h=vp
+            vx1,vy1,vx2,vy2=M+0.5,M+0.5,sx-0.5,PH-M-1.4
+            vw,vh=vx2-vx1,vy2-vy1
+            need=max(w/(vw*u_per_in),h/(vh*u_per_in))
+            F,label=pick_scale(need,ins_units)
+            if not units_known: label=f"{label} (VERIFY UNITS)"
+            lay.add_viewport(center=((vx1+vx2)/2,(vy1+vy2)/2),size=(vw,vh),
+                             view_center_point=(cx,cy),view_height=vh*F*u_per_in,
+                             dxfattribs={"layer":"DEFPOINTS"})
+            tx(f"{title}   SCALE: {label}",vx1,vy2+0.3,0.22,"E-ANNO-TITL")
+            for ent in lay:
+                if ent.dxftype()=="TEXT" and ent.dxf.text=="AS NOTED": ent.dxf.text=label
+        return num
+
+    made=[]
+    # E-001 legend + general notes
+    made.append(sheet("E-001 LEGEND","LEGEND & GENERAL NOTES"))
+    lay=out.layouts.get("E-001 LEGEND")
+    _make_symbols(out)
+    x=M+1.0; y=PH-M-1.2
+    lay.add_text("ELECTRICAL LEGEND",dxfattribs={"layer":"E-ANNO-TITL","color":256,"insert":(x,y),"height":0.3})
+    y-=0.9
+    for bname,desc in [("E-RECP-DUPLEX","DUPLEX RECEPTACLE, 20A-125V, NEMA 5-20R"),
+                       ("E-RECP-GFCI","DUPLEX RECEPTACLE, GFCI"),
+                       ("E-SWCH-1P","SINGLE POLE SWITCH"),
+                       ("E-LITE-CLNG","CEILING MOUNTED LIGHT FIXTURE"),
+                       ("E-LITE-2X4","2'x4' RECESSED LED TROFFER"),
+                       ("E-DATA","DATA / TELECOM OUTLET"),
+                       ("E-JBOX","JUNCTION BOX"),
+                       ("E-PANL","PANELBOARD, SURFACE MOUNTED")]:
+        lay.add_blockref(bname,(x+0.3,y),dxfattribs={"layer":"E-SYMB","color":256})
+        lay.add_text(desc,dxfattribs={"layer":"E-ANNO-TEXT","color":256,"insert":(x+1.0,y-0.07),"height":0.14})
+        y-=0.65
+    gx=M+14.0; gy=PH-M-1.2
+    lay.add_text("GENERAL NOTES",dxfattribs={"layer":"E-ANNO-TITL","color":256,"insert":(gx,gy),"height":0.3})
+    gy-=0.9
+    for i,n in enumerate([
+        "ALL WORK SHALL COMPLY WITH THE NATIONAL ELECTRICAL CODE (NFPA 70), LATEST ADOPTED EDITION, AND ALL LOCAL AMENDMENTS.",
+        "CONTRACTOR SHALL VERIFY ALL EXISTING CONDITIONS AND DIMENSIONS IN THE FIELD PRIOR TO ROUGH-IN.",
+        "ALL RECEPTACLES IN KITCHENS, BATHROOMS, GARAGES, OUTDOORS AND WITHIN 6 FT OF SINKS SHALL BE GFCI PROTECTED PER NEC 210.8.",
+        "ALL BRANCH CIRCUITS SERVING DWELLING UNIT AREAS PER NEC 210.12 SHALL BE AFCI PROTECTED.",
+        "PROVIDE EQUIPMENT GROUNDING CONDUCTOR IN ALL RACEWAYS. SIZE PER NEC 250.122.",
+        "MOUNTING HEIGHTS (TO CENTERLINE, U.N.O.): RECEPTACLES 18\", SWITCHES 48\", COUNTER RECEPTACLES 42\".",
+        "COORDINATE ALL LIGHT FIXTURE LOCATIONS WITH THE REFLECTED CEILING PLAN AND MECHANICAL EQUIPMENT.",
+        "ARCHITECTURAL BACKGROUND SHOWN FOR REFERENCE ONLY. REFER TO ARCHITECTURAL DRAWINGS FOR DIMENSIONS.",
+    ],1):
+        lay.add_text(f"{i}.  {n}",dxfattribs={"layer":"E-ANNO-TEXT","color":256,"insert":(gx,gy),"height":0.13})
+        gy-=0.45
+
+    # Discipline sheets, one per floor
+    for dname,series in DISC:
+        for k,zi in enumerate(order):
+            num=f"E-{series}{k+1:02d} {dname} {names[zi]}"
+            made.append(sheet(num,f"{dname} PLAN - {names[zi]}",vp=copies[(zi,dname)]))
+
+    for junk in ("Layout1","Layout2"):
+        try:
+            if junk in out.layouts: out.layouts.delete(junk)
+        except: pass
+    return made
+
+def _make_symbols(out):
+    """Starter NEC symbol blocks, drawn in paper inches. Reused by the
+    placement step later (scale = sheet factor × model units per inch)."""
+    S="E-SYMB"
+    def blk(name):
+        if name in out.blocks: return None
+        return out.blocks.new(name)
+    b=blk("E-RECP-DUPLEX")
+    if b:
+        b.add_circle((0,0),0.11,dxfattribs={"layer":S})
+        b.add_line((-0.11,0.04),(0.11,0.04),dxfattribs={"layer":S})
+        b.add_line((-0.11,-0.04),(0.11,-0.04),dxfattribs={"layer":S})
+    b=blk("E-RECP-GFCI")
+    if b:
+        b.add_circle((0,0),0.11,dxfattribs={"layer":S})
+        b.add_line((-0.11,0.04),(0.11,0.04),dxfattribs={"layer":S})
+        b.add_line((-0.11,-0.04),(0.11,-0.04),dxfattribs={"layer":S})
+        b.add_text("GFCI",dxfattribs={"layer":S,"insert":(0.16,-0.04),"height":0.08})
+    b=blk("E-SWCH-1P")
+    if b: b.add_text("S",dxfattribs={"layer":S,"insert":(-0.06,-0.08),"height":0.18})
+    b=blk("E-LITE-CLNG")
+    if b:
+        b.add_circle((0,0),0.13,dxfattribs={"layer":S})
+        for dx,dy in ((0.13,0),(-0.13,0),(0,0.13),(0,-0.13)):
+            b.add_line((dx,dy),(dx*1.5,dy*1.5),dxfattribs={"layer":S})
+    b=blk("E-LITE-2X4")
+    if b:
+        b.add_lwpolyline([(-0.4,-0.2),(0.4,-0.2),(0.4,0.2),(-0.4,0.2)],close=True,dxfattribs={"layer":S})
+        b.add_line((-0.4,0),(0.4,0),dxfattribs={"layer":S})
+    b=blk("E-DATA")
+    if b: b.add_lwpolyline([(-0.12,-0.1),(0.12,-0.1),(0,0.12)],close=True,dxfattribs={"layer":S})
+    b=blk("E-JBOX")
+    if b:
+        b.add_circle((0,0),0.09,dxfattribs={"layer":S})
+        b.add_text("J",dxfattribs={"layer":S,"insert":(-0.035,-0.05),"height":0.1})
+    b=blk("E-PANL")
+    if b:
+        b.add_lwpolyline([(-0.3,-0.12),(0.3,-0.12),(0.3,0.12),(-0.3,0.12)],close=True,dxfattribs={"layer":S})
+        for i in range(-2,3): b.add_line((i*0.1-0.06,-0.12),(i*0.1+0.06,0.12),dxfattribs={"layer":S})
 
 def process_files(uploaded_files):
     tmp = Path(tempfile.mkdtemp())
@@ -305,9 +558,24 @@ def process_files(uploaded_files):
     all_x1=min(z[0] for z in zones)-200; all_x2=max(z[1] for z in zones)+200
     all_y1=min(z[2] for z in zones)-200; all_y2=max(z[3] for z in zones)+200
 
-    out=ezdxf.new("R2000")
+    out=ezdxf.new("R2000", setup=True)     # setup=True loads CENTER/DASHED linetypes
+    for lname,(col,lt,lw) in OUT_LAYERS.items():
+        if lname not in out.layers:
+            L=out.layers.new(lname)
+            L.color=col; L.dxf.linetype=lt if lt in out.linetypes else "Continuous"
+            L.dxf.lineweight=lw
+            if lname=="DEFPOINTS": L.dxf.plot=0
     out_msp=out.modelspace()
     ec=[0]
+    ins_units=int(doc_m.header.get("$INSUNITS",0) or 0)
+    plan_w=max(z[1] for z in zones)-min(z[0] for z in zones)
+    out.header["$LTSCALE"]=max(1.0,round(plan_w/120.0,2))
+    out.header["$PSLTSCALE"]=0
+    out.header["$CELTSCALE"]=1.0
+    def A(src,et="LINE",closed=None):
+        d={"layer":map_layer(src,et),"color":256}
+        if closed is not None: d["closed"]=closed
+        return d
 
     if xref_name:
         def ib(cx,cy): return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
@@ -328,14 +596,14 @@ def process_files(uploaded_files):
                         p1=xf(be.dxf.start.x,be.dxf.start.y)
                         p2=xf(be.dxf.end.x,be.dxf.end.y)
                         if ib((p1[0]+p2[0])/2,(p1[1]+p2[1])/2):
-                            out_msp.add_line(p1,p2,dxfattribs={"layer":bl,"color":8})
+                            out_msp.add_line(p1,p2,dxfattribs=A(bl,bt))
                             ec[0]+=1
                     elif bt=="LWPOLYLINE":
                         pts=list(be.get_points())
                         if pts:
                             tp=[xf(p[0],p[1]) for p in pts]
                             if ib(sum(p[0] for p in tp)/len(tp),sum(p[1] for p in tp)/len(tp)):
-                                out_msp.add_lwpolyline(tp,dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                                out_msp.add_lwpolyline(tp,dxfattribs=A(bl,bt,be.is_closed))
                                 ec[0]+=1
                     elif bt=="ARC":
                         nc=xf(be.dxf.center.x,be.dxf.center.y)
@@ -343,20 +611,20 @@ def process_files(uploaded_files):
                             out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
                                 start_angle=be.dxf.start_angle+math.degrees(rot),
                                 end_angle=be.dxf.end_angle+math.degrees(rot),
-                                dxfattribs={"layer":bl,"color":8})
+                                dxfattribs=A(bl,bt))
                             ec[0]+=1
                     elif bt=="CIRCLE":
                         nc=xf(be.dxf.center.x,be.dxf.center.y)
                         if ib(nc[0],nc[1]):
                             out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
-                                dxfattribs={"layer":bl,"color":8})
+                                dxfattribs=A(bl,bt))
                             ec[0]+=1
                     elif bt=="SPLINE":
                         sp=list(be.control_points)
                         if sp:
                             tp=[xf(p[0],p[1]) for p in sp]
                             if ib(sum(p[0] for p in tp)/len(tp),sum(p[1] for p in tp)/len(tp)):
-                                out_msp.add_lwpolyline(tp,dxfattribs={"layer":bl,"color":8})
+                                out_msp.add_lwpolyline(tp,dxfattribs=A(bl,bt))
                                 ec[0]+=1
                     elif bt=="INSERT":
                         ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
@@ -382,31 +650,31 @@ def process_files(uploaded_files):
                     if bt=="LINE":
                         out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
                             xf(be.dxf.end.x,be.dxf.end.y),
-                            dxfattribs={"layer":bl,"color":8})
+                            dxfattribs=A(bl,bt))
                         ec[0]+=1
                     elif bt=="LWPOLYLINE":
                         pts=list(be.get_points())
                         if pts:
                             out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
-                                dxfattribs={"layer":bl,"color":8,"closed":be.is_closed})
+                                dxfattribs=A(bl,bt,be.is_closed))
                             ec[0]+=1
                     elif bt=="ARC":
                         nc=xf(be.dxf.center.x,be.dxf.center.y)
                         out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
                             start_angle=be.dxf.start_angle+math.degrees(rot),
                             end_angle=be.dxf.end_angle+math.degrees(rot),
-                            dxfattribs={"layer":bl,"color":8})
+                            dxfattribs=A(bl,bt))
                         ec[0]+=1
                     elif bt=="CIRCLE":
                         nc=xf(be.dxf.center.x,be.dxf.center.y)
                         out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
-                            dxfattribs={"layer":bl,"color":8})
+                            dxfattribs=A(bl,bt))
                         ec[0]+=1
                     elif bt=="SPLINE":
                         sp=list(be.control_points)
                         if sp:
                             out_msp.add_lwpolyline([xf(p[0],p[1]) for p in sp],
-                                dxfattribs={"layer":bl,"color":8})
+                                dxfattribs=A(bl,bt))
                             ec[0]+=1
                     elif bt=="INSERT":
                         ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
@@ -425,12 +693,18 @@ def process_files(uploaded_files):
             for (X1,X2,Y1,Y2) in zones:
                 placed=False
                 if t=="LINE":
-                    cx=(e.dxf.start.x+e.dxf.end.x)/2
-                    cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        out_msp.add_line((e.dxf.start.x,e.dxf.start.y),
-                            (e.dxf.end.x,e.dxf.end.y),
-                            dxfattribs={"layer":layer,"color":8})
+                    sx_,sy_=e.dxf.start.x,e.dxf.start.y
+                    ex_,ey_=e.dxf.end.x,e.dxf.end.y
+                    if is_grid_layer(layer):
+                        # grid lines run past the plan: keep if the segment
+                        # bbox overlaps the zone at all
+                        bx1,bx2=min(sx_,ex_),max(sx_,ex_); by1,by2=min(sy_,ey_),max(sy_,ey_)
+                        hit = bx1<=X2 and bx2>=X1 and by1<=Y2 and by2>=Y1
+                    else:
+                        cx=(sx_+ex_)/2; cy=(sy_+ey_)/2
+                        hit = X1<=cx<=X2 and Y1<=cy<=Y2
+                    if hit:
+                        out_msp.add_line((sx_,sy_),(ex_,ey_),dxfattribs=A(layer,t))
                         placed=True
                 elif t=="LWPOLYLINE":
                     pts=list(e.get_points())
@@ -439,20 +713,20 @@ def process_files(uploaded_files):
                         cy=sum(p[1] for p in pts)/len(pts)
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
-                                dxfattribs={"layer":layer,"color":8,"closed":e.is_closed})
+                                dxfattribs=A(layer,t,e.is_closed))
                             placed=True
                 elif t=="ARC":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_arc(center=(cx,cy),radius=e.dxf.radius,
                             start_angle=e.dxf.start_angle,end_angle=e.dxf.end_angle,
-                            dxfattribs={"layer":layer,"color":8})
+                            dxfattribs=A(layer,t))
                         placed=True
                 elif t=="CIRCLE":
                     cx,cy=e.dxf.center.x,e.dxf.center.y
                     if X1<=cx<=X2 and Y1<=cy<=Y2:
                         out_msp.add_circle(center=(cx,cy),radius=e.dxf.radius,
-                            dxfattribs={"layer":layer,"color":8})
+                            dxfattribs=A(layer,t))
                         placed=True
                 elif t=="SPLINE":
                     pts=list(e.control_points)
@@ -461,7 +735,7 @@ def process_files(uploaded_files):
                         cy=sum(p[1] for p in pts)/len(pts)
                         if X1<=cx<=X2 and Y1<=cy<=Y2:
                             out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
-                                dxfattribs={"layer":layer,"color":8})
+                                dxfattribs=A(layer,t))
                             placed=True
                 elif t=="INSERT":
                     cx,cy=e.dxf.insert.x,e.dxf.insert.y
@@ -493,7 +767,7 @@ def process_files(uploaded_files):
                     for (X1,X2,Y1,Y2) in zones:
                         if X1<=ix<=X2 and Y1<=iy<=Y2:
                             out_msp.add_text(txt[:50],dxfattribs={
-                                "layer":"ROOM-LABELS","color":253,
+                                "layer":text_layer(getattr(e.dxf,'layer','')),"color":256,
                                 "insert":(ix,iy),"height":h,"rotation":txt_rot})
                             placed_labels+=1
                             break
@@ -514,7 +788,7 @@ def process_files(uploaded_files):
                     mx,my=a1_to_master(ix,iy)
                     txt_rot=txt_rot-math.degrees(xref_rot)
                     if my<1000:
-                        tl.append((mx,my,txt,h*xref_sx,txt_rot))
+                        tl.append((mx,my,txt,h*xref_sx,txt_rot,text_layer(getattr(e.dxf,'layer',''))))
             except: pass
         # Fallback: read directly from Master, find nearest X cluster to zone
         if not tl:
@@ -545,14 +819,13 @@ def process_files(uploaded_files):
         for (X1,X2,Y1,Y2) in zones:
             zone_cx=(X1+X2)/2
             zone_buf=300
-            zone_lbls=[(mx,my,t,h,r) for mx,my,t,h,r in tl
-                       if (Y1-zone_buf)<=my<=(Y2+zone_buf)]
+            zone_lbls=[it for it in tl if (Y1-zone_buf)<=it[1]<=(Y2+zone_buf)]
             if not zone_lbls: continue
-            avg_mx=sum(mx for mx,my,t,h,r in zone_lbls)/len(zone_lbls)
+            avg_mx=sum(it[0] for it in zone_lbls)/len(zone_lbls)
             xc=zone_cx-avg_mx
-            for mx,my,txt,h,txt_rot in zone_lbls:
+            for mx,my,txt,h,txt_rot,lay in zone_lbls:
                 out_msp.add_text(txt[:50],dxfattribs={
-                    "layer":"ROOM-LABELS","color":253,
+                    "layer":lay,"color":256,
                     "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
                 placed_labels+=1
 
@@ -600,10 +873,55 @@ def process_files(uploaded_files):
                     floor_keys.add((round((a[0]+b[0])/2/MG),round((a[1]+b[1])/2/MG)))
         except: pass
 
+    # Floor wall bbox (for aligning an RCP drawn somewhere else)
+    def _bbox(pts):
+        xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
+        return (min(xs),max(xs),min(ys),max(ys)) if pts else None
+    _fw=[]
+    for e in out_msp:
+        try:
+            if e.dxftype()=="LINE" and e.dxf.layer=="A-WALL":
+                _fw.append(((e.dxf.start.x+e.dxf.end.x)/2,(e.dxf.start.y+e.dxf.end.y)/2))
+        except: pass
+    fbox=_bbox(_fw) if len(_fw)>=20 else (min(z[0] for z in zones),max(z[1] for z in zones),
+                                          min(z[2] for z in zones),max(z[3] for z in zones))
+    def _overlap(a,b):
+        if not a or not b: return 0.0
+        ix=max(0,min(a[1],b[1])-max(a[0],b[0])); iy=max(0,min(a[3],b[3])-max(a[2],b[2]))
+        aa=(a[1]-a[0])*(a[3]-a[2]); ab=(b[1]-b[0])*(b[3]-b[2])
+        return (ix*iy)/max(1e-9,min(aa,ab))
+    _WALLKW=("WALL","MURO","PARED")
+
     for rcp_path in rcp_paths:
         try:
             doc_rcp=ezdxf.readfile(str(rcp_path))
             msp_rcp=doc_rcp.modelspace()
+            src_doc,src_msp,src_name=doc_rcp,msp_rcp,"self"
+
+            # 1. Is this sheet xref'ing its ceiling from another uploaded file?
+            rx=None
+            for e in msp_rcp:
+                try:
+                    if e.dxftype()=="INSERT" and e.dxf.name not in SKIP_BLOCKS:
+                        nm=e.dxf.name.lower()
+                        if nm in dxf_stems and nm!=rcp_path.stem.lower():
+                            rx=(nm,e.dxf.insert.x,e.dxf.insert.y,
+                                getattr(e.dxf,'xscale',1.0),getattr(e.dxf,'yscale',1.0),
+                                math.radians(getattr(e.dxf,'rotation',0.0)))
+                            break
+                except: pass
+            def sheet_to_src(ax,ay):
+                if not rx: return ax,ay
+                _,ix_,iy_,sx_,sy_,rot_=rx
+                dx=ax-ix_; dy=ay-iy_
+                cr=math.cos(-rot_); sr=math.sin(-rot_)
+                return (dx*cr-dy*sr)/sx_,(dx*sr+dy*cr)/sy_
+            if rx:
+                p_src=next((p for p in dxf_paths if p.stem.lower()==rx[0]),None)
+                if p_src:
+                    src_doc=ezdxf.readfile(str(p_src)); src_msp=src_doc.modelspace(); src_name=p_src.name
+
+            # 2. RCP's own viewport zones, in SOURCE coords (None = unrestricted)
             rcp_zones=[]
             for layout in doc_rcp.layouts:
                 if layout.name=="Model": continue
@@ -612,27 +930,22 @@ def process_files(uploaded_files):
                         if e.dxftype()=="VIEWPORT":
                             vcp=getattr(e.dxf,'view_center_point',None)
                             vh=getattr(e.dxf,'view_height',None)
-                            ps_w=getattr(e.dxf,'width',None)
-                            ps_h=getattr(e.dxf,'height',None)
+                            ps_w=getattr(e.dxf,'width',None); ps_h=getattr(e.dxf,'height',None)
                             if vcp and vh and vh>0:
-                                mx,my=vcp.x,vcp.y
+                                mx,my=sheet_to_src(vcp.x,vcp.y)
                                 half_h=vh/2
                                 aspect=(ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
                                 half_w=half_h*aspect
                                 if half_w<50 or half_h<50: continue
                                 rcp_zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
                     except: pass
-            if not rcp_zones:
-                # Model-only RCP file: assume same coordinate space as the plan
-                rcp_zones=list(zones)
+            _insrc=(lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in rcp_zones)) if rcp_zones else (lambda x,y: True)
 
-            # Decide mirror vs aligned: which orientation lands more of the
-            # RCP's geometry on top of floor-plan geometry? Mirror stays the
-            # default unless "aligned" wins decisively.
-            def _rcp_midpoints(limit=20000):
+            # 3. Sample the RCP geometry (raw source coords) + which are walls
+            def _walk_pts(limit=30000):
                 out=[]
                 def walk(ents,ix,iy,sx,sy,rot,d):
-                    if d>2 or len(out)>=limit: return
+                    if d>3 or len(out)>=limit: return
                     cr,sr=math.cos(rot),math.sin(rot)
                     def xf(px,py):
                         lx,ly=px*sx,py*sy
@@ -640,146 +953,154 @@ def process_files(uploaded_files):
                     for be in ents:
                         if len(out)>=limit: return
                         try:
-                            bt=be.dxftype()
+                            bt=be.dxftype(); lay=getattr(be.dxf,'layer','').upper()
+                            w=any(k in lay for k in _WALLKW)
                             if bt=="LINE":
                                 p1=xf(be.dxf.start.x,be.dxf.start.y); p2=xf(be.dxf.end.x,be.dxf.end.y)
-                                out.append(((p1[0]+p2[0])/2,(p1[1]+p2[1])/2))
+                                out.append(((p1[0]+p2[0])/2,(p1[1]+p2[1])/2,w))
                             elif bt=="LWPOLYLINE":
                                 pts=[xf(p[0],p[1]) for p in be.get_points()]
-                                for a,b in zip(pts,pts[1:]): out.append(((a[0]+b[0])/2,(a[1]+b[1])/2))
-                            elif bt=="INSERT" and be.dxf.name in doc_rcp.blocks:
+                                for a,b in zip(pts,pts[1:]): out.append(((a[0]+b[0])/2,(a[1]+b[1])/2,w))
+                            elif bt=="INSERT" and be.dxf.name in src_doc.blocks:
                                 ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                                walk(doc_rcp.blocks[be.dxf.name],ni,nj,
+                                walk(src_doc.blocks[be.dxf.name],ni,nj,
                                      sx*getattr(be.dxf,'xscale',1.0),sy*getattr(be.dxf,'yscale',1.0),
                                      rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
                         except: pass
-                walk(msp_rcp,0,0,1,1,0,0)
+                walk(src_msp,0,0,1,1,0,0)
                 return out
-            _mids=_rcp_midpoints()
-            _in=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in rcp_zones)
-            _mids=[(x,y) for x,y in _mids if _in(x,y)]
-            score_mirror=sum((round((2*floor_cx-x)/MG),round(y/MG)) in floor_keys for x,y in _mids)
-            score_align =sum((round(x/MG),round(y/MG)) in floor_keys for x,y in _mids)
-            use_mirror = not (score_align>=20 and score_align>2*score_mirror)
-            rcp_names.append(f"{rcp_path.name} ({'mirrored' if use_mirror else 'aligned'})")
-            def mirx(x): return (2*floor_cx-x) if use_mirror else x
+            _all=[p for p in _walk_pts() if _insrc(p[0],p[1])]
+            _wpts=[(x,y) for x,y,w in _all if w]
+            rbox=_bbox(_wpts) if len(_wpts)>=20 else _bbox([(x,y) for x,y,_ in _all])
+
+            # 4. Translate if the RCP sits somewhere else than the plan
+            tx=ty=0.0
+            if rbox and _overlap(rbox,fbox)<0.3:
+                tx=(fbox[0]+fbox[1])/2-(rbox[0]+rbox[1])/2
+                ty=(fbox[2]+fbox[3])/2-(rbox[2]+rbox[3])/2
+
+            # 5. Mirror vs aligned, scored on the translated points
+            score_mirror=sum((round((2*floor_cx-(x+tx))/MG),round((y+ty)/MG)) in floor_keys for x,y,_ in _all)
+            score_align =sum((round((x+tx)/MG),round((y+ty)/MG)) in floor_keys for x,y,_ in _all)
+            # Trust the better match; ties keep the mirror default (Revit)
+            use_mirror = not (score_align>=5 and score_align>score_mirror)
+            def T(x,y):
+                x2=x+tx; y2=y+ty
+                return ((2*floor_cx-x2) if use_mirror else x2), y2
             def mira(sa,ea):
                 return ((180-ea)%360,(180-sa)%360) if use_mirror else (sa,ea)
-            rcp_ec=[0]
+            _inz=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in zones)
+
+            # 6. Extract: raw world coords through the block tree, T() at the leaf
+            rcp_ec=[0]; RA={"layer":"A-RCP","color":256}
             def explode_rcp(bn,ix,iy,sx,sy,rot,d=0,in_ceil=False):
-                if d>3 or rcp_ec[0]>30000: return
-                if bn not in doc_rcp.blocks: return
+                if d>4 or rcp_ec[0]>60000: return
+                if bn not in src_doc.blocks: return
                 cr,sr=math.cos(rot),math.sin(rot)
                 def xf(px,py):
                     lx,ly=px*sx,py*sy
-                    rx=ix+lx*cr-ly*sr; ry=iy+lx*sr+ly*cr
-                    return mirx(rx),ry
-                for be in doc_rcp.blocks[bn]:
-                    if rcp_ec[0]>30000: break
+                    return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
+                for be in src_doc.blocks[bn]:
+                    if rcp_ec[0]>60000: break
                     try:
                         bl=getattr(be.dxf,'layer','0')
                         if bl in SKIP: continue
                         bt=be.dxftype()
                         if bt=="INSERT":
                             ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                            new_in=in_ceil or is_ceiling_layer(bl)
                             explode_rcp(be.dxf.name,ni,nj,
-                                sx*getattr(be.dxf,'xscale',1.0),
-                                sy*getattr(be.dxf,'yscale',1.0),
+                                sx*getattr(be.dxf,'xscale',1.0),sy*getattr(be.dxf,'yscale',1.0),
                                 rot+math.radians(getattr(be.dxf,'rotation',0.0)),
-                                d+1,new_in)
+                                d+1,in_ceil or is_ceiling_layer(bl))
                             continue
                         if bl in RCP_GRID: continue
                         if not in_ceil and not is_ceiling_layer(bl): continue
                         if bt=="LINE":
-                            out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
-                                xf(be.dxf.end.x,be.dxf.end.y),
-                                dxfattribs={"layer":"A-RCP","color":9})
-                            rcp_ec[0]+=1
+                            p1=xf(be.dxf.start.x,be.dxf.start.y); p2=xf(be.dxf.end.x,be.dxf.end.y)
+                            m=((p1[0]+p2[0])/2,(p1[1]+p2[1])/2)
+                            if _insrc(*m) and _inz(*T(*m)):
+                                out_msp.add_line(T(*p1),T(*p2),dxfattribs=RA); rcp_ec[0]+=1
                         elif bt=="LWPOLYLINE":
-                            pts=list(be.get_points())
+                            pts=[xf(p[0],p[1]) for p in be.get_points()]
                             if pts:
-                                out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
-                                    dxfattribs={"layer":"A-RCP","color":9,"closed":be.is_closed})
-                                rcp_ec[0]+=1
+                                m=(sum(p[0] for p in pts)/len(pts),sum(p[1] for p in pts)/len(pts))
+                                if _insrc(*m) and _inz(*T(*m)):
+                                    out_msp.add_lwpolyline([T(*p) for p in pts],
+                                        dxfattribs={**RA,"closed":be.is_closed}); rcp_ec[0]+=1
                         elif bt=="ARC":
                             nc=xf(be.dxf.center.x,be.dxf.center.y)
-                            sa,ea=mira(be.dxf.start_angle,be.dxf.end_angle)
-                            out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
-                                start_angle=sa,end_angle=ea,
-                                dxfattribs={"layer":"A-RCP","color":9})
-                            rcp_ec[0]+=1
+                            if _insrc(*nc) and _inz(*T(*nc)):
+                                sa,ea=mira(be.dxf.start_angle+math.degrees(rot),be.dxf.end_angle+math.degrees(rot))
+                                out_msp.add_arc(center=T(*nc),radius=be.dxf.radius*sx,
+                                    start_angle=sa,end_angle=ea,dxfattribs=RA); rcp_ec[0]+=1
                         elif bt=="CIRCLE":
-                            out_msp.add_circle(center=xf(be.dxf.center.x,be.dxf.center.y),
-                                radius=be.dxf.radius*sx,dxfattribs={"layer":"A-RCP","color":9})
-                            rcp_ec[0]+=1
+                            nc=xf(be.dxf.center.x,be.dxf.center.y)
+                            if _insrc(*nc) and _inz(*T(*nc)):
+                                out_msp.add_circle(center=T(*nc),radius=be.dxf.radius*sx,dxfattribs=RA); rcp_ec[0]+=1
                     except: pass
-            for e in msp_rcp:
+            for e in src_msp:
                 try:
                     layer=getattr(e.dxf,'layer','0')
                     if layer in SKIP: continue
                     t=e.dxftype()
                     if t!="INSERT" and layer in RCP_GRID: continue
                     if t!="INSERT" and not is_ceiling_layer(layer): continue
-                    for (X1,X2,Y1,Y2) in rcp_zones:
-                        placed=False
-                        if t=="LINE":
-                            cx=(e.dxf.start.x+e.dxf.end.x)/2
-                            cy=(e.dxf.start.y+e.dxf.end.y)/2
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                out_msp.add_line((mirx(e.dxf.start.x),e.dxf.start.y),
-                                    (mirx(e.dxf.end.x),e.dxf.end.y),
-                                    dxfattribs={"layer":"A-RCP","color":9})
-                                placed=True
-                        elif t=="LWPOLYLINE":
-                            pts=list(e.get_points())
-                            if pts:
-                                cx=sum(p[0] for p in pts)/len(pts)
-                                cy=sum(p[1] for p in pts)/len(pts)
-                                if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                    out_msp.add_lwpolyline([(mirx(p[0]),p[1]) for p in pts],
-                                        dxfattribs={"layer":"A-RCP","color":9,"closed":e.is_closed})
-                                    placed=True
-                        elif t=="ARC":
-                            cx,cy=e.dxf.center.x,e.dxf.center.y
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                sa,ea=mira(e.dxf.start_angle,e.dxf.end_angle)
-                                out_msp.add_arc(center=(mirx(cx),cy),radius=e.dxf.radius,
-                                    start_angle=sa,end_angle=ea,
-                                    dxfattribs={"layer":"A-RCP","color":9})
-                                placed=True
-                        elif t=="CIRCLE":
-                            cx,cy=e.dxf.center.x,e.dxf.center.y
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                out_msp.add_circle(center=(mirx(cx),cy),radius=e.dxf.radius,
-                                    dxfattribs={"layer":"A-RCP","color":9})
-                                placed=True
-                        elif t=="INSERT":
-                            cx,cy=e.dxf.insert.x,e.dxf.insert.y
-                            if X1<=cx<=X2 and Y1<=cy<=Y2:
-                                explode_rcp(e.dxf.name,mirx(cx),cy,
-                                    getattr(e.dxf,'xscale',1.0),
-                                    getattr(e.dxf,'yscale',1.0),
-                                    math.radians(getattr(e.dxf,'rotation',0.0)),
-                                    0,is_ceiling_layer(layer))
-                                placed=True
-                        if placed:
-                            rcp_count+=1; break
+                    if t=="LINE":
+                        p1=(e.dxf.start.x,e.dxf.start.y); p2=(e.dxf.end.x,e.dxf.end.y)
+                        m=((p1[0]+p2[0])/2,(p1[1]+p2[1])/2)
+                        if _insrc(*m) and _inz(*T(*m)):
+                            out_msp.add_line(T(*p1),T(*p2),dxfattribs=RA); rcp_ec[0]+=1
+                    elif t=="LWPOLYLINE":
+                        pts=[(p[0],p[1]) for p in e.get_points()]
+                        if pts:
+                            m=(sum(p[0] for p in pts)/len(pts),sum(p[1] for p in pts)/len(pts))
+                            if _insrc(*m) and _inz(*T(*m)):
+                                out_msp.add_lwpolyline([T(*p) for p in pts],
+                                    dxfattribs={**RA,"closed":e.is_closed}); rcp_ec[0]+=1
+                    elif t=="ARC":
+                        nc=(e.dxf.center.x,e.dxf.center.y)
+                        if _insrc(*nc) and _inz(*T(*nc)):
+                            sa,ea=mira(e.dxf.start_angle,e.dxf.end_angle)
+                            out_msp.add_arc(center=T(*nc),radius=e.dxf.radius,
+                                start_angle=sa,end_angle=ea,dxfattribs=RA); rcp_ec[0]+=1
+                    elif t=="CIRCLE":
+                        nc=(e.dxf.center.x,e.dxf.center.y)
+                        if _insrc(*nc) and _inz(*T(*nc)):
+                            out_msp.add_circle(center=T(*nc),radius=e.dxf.radius,dxfattribs=RA); rcp_ec[0]+=1
+                    elif t=="INSERT":
+                        # follow every insert; leaves decide by zone
+                        explode_rcp(e.dxf.name,e.dxf.insert.x,e.dxf.insert.y,
+                            getattr(e.dxf,'xscale',1.0),getattr(e.dxf,'yscale',1.0),
+                            math.radians(getattr(e.dxf,'rotation',0.0)),
+                            0,is_ceiling_layer(layer))
                 except: pass
+            rcp_count+=rcp_ec[0]
+            rcp_names.append(
+                f"{rcp_path.name} [src={src_name}, vp={len(rcp_zones)}, pts={len(_all)}, walls={len(_wpts)}, "
+                f"shift=({tx:.0f},{ty:.0f}), align={score_align}/mirror={score_mirror} → "
+                f"{'mirrored' if use_mirror else 'aligned'}, added={rcp_ec[0]}]")
+            if src_doc is not doc_rcp: del src_doc
             del doc_rcp
             gc.collect()
         except Exception as ex:
-            st.write(f"RCP error: {ex}")
+            rcp_names.append(f"{rcp_path.name} [ERROR: {ex}]")
+
+    # ── PROJECT STRUCTURE ────────────────────────────────────────────────────
+    stems=[p.stem for p in dxf_paths]
+    pre=os.path.commonprefix(stems).strip(" -_")
+    project=pre if len(pre)>=4 else max(stems,key=len)
+    sheets=build_project(out,zones,ins_units,project,has_rcp=bool(rcp_names))
 
     out_path=tmp/"floor_plan_clean.dxf"
     out.saveas(str(out_path))
     dxf_bytes=out_path.read_bytes()
     dwg_path=dxf_to_dwg(out_path)
     dwg_bytes=dwg_path.read_bytes() if dwg_path else None
-    msg=f"Done. {ec[0]} entities, {placed_labels} labels"
+    msg=f"Done. {ec[0]+copied} entities, {placed_labels} labels"
     if not dwg_bytes: msg+=" (DWG conversion failed — DXF only)"
     if debug_info: msg+=" | "+" | ".join(debug_info)
     if rcp_names: msg+=f", RCP on layer A-RCP from {'; '.join(rcp_names)}"
+    msg+=f". Sheets: {', '.join(sheets)}"
     return (dxf_bytes,dwg_bytes),msg+".",None
 
 # ── UI ────────────────────────────────────────────────────────────────────────
