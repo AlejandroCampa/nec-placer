@@ -43,6 +43,17 @@ def dwg_to_dxf(dwg_path: Path) -> Path:
     except: pass
     return None
 
+def dxf_to_dwg(dxf_path: Path) -> Path:
+    """libredwg dxf2dwg — writes R2000 reliably."""
+    try:
+        out = dxf_path.with_suffix(".dwg")
+        subprocess.run(["dxf2dwg", "-y", "--as", "r2000", "-o", str(out), str(dxf_path)],
+                       capture_output=True, timeout=120)
+        if out.exists() and out.stat().st_size > 0:
+            return out
+    except: pass
+    return None
+
 SKIP = ["EXIST-SPOT-ELEV","Surface_CONTOUR","Surface_CONTOUR_TAG",
         "Surface_CONTOUR_IDX","Surface_CONTOUR_MID","SECTTAG",
         "site-info","SECCION-LINE","PROPERTY LIMT","_NATURAL",
@@ -66,8 +77,9 @@ def sheet_score(name):
     return 1
 
 def is_rcp(name):
-    n = name.lower()
-    return any(k in n for k in ["rcp","reflected ceiling","ceiling plan","a103"])
+    n = re.sub(r'[_\-]+',' ',name.lower())
+    n = re.sub(r'\s+',' ',n)
+    return any(k in n for k in ["rcp","reflected","ceiling plan","a103"])
 
 CEIL_LAYER_KW=("CLNG","CEIL","LITE","LIGHT","LAMP","LUM","PLAF","CIELO",
                "LUZ","LUCES","ILUMIN")
@@ -293,7 +305,7 @@ def process_files(uploaded_files):
     all_x1=min(z[0] for z in zones)-200; all_x2=max(z[1] for z in zones)+200
     all_y1=min(z[2] for z in zones)-200; all_y2=max(z[3] for z in zones)+200
 
-    out=ezdxf.new("R2018")
+    out=ezdxf.new("R2000")
     out_msp=out.modelspace()
     ec=[0]
 
@@ -761,10 +773,14 @@ def process_files(uploaded_files):
 
     out_path=tmp/"floor_plan_clean.dxf"
     out.saveas(str(out_path))
+    dxf_bytes=out_path.read_bytes()
+    dwg_path=dxf_to_dwg(out_path)
+    dwg_bytes=dwg_path.read_bytes() if dwg_path else None
     msg=f"Done. {ec[0]} entities, {placed_labels} labels"
+    if not dwg_bytes: msg+=" (DWG conversion failed — DXF only)"
     if debug_info: msg+=" | "+" | ".join(debug_info)
     if rcp_names: msg+=f", RCP on layer A-RCP from {'; '.join(rcp_names)}"
-    return out_path.read_bytes(),msg+".",None
+    return (dxf_bytes,dwg_bytes),msg+".",None
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -781,10 +797,19 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 if st.session_state.result:
+    dxf_bytes,dwg_bytes=st.session_state.result
     with st.chat_message("assistant"):
-        st.download_button("Download floor_plan_clean.dxf",
-            data=st.session_state.result,file_name="floor_plan_clean.dxf",
-            mime="application/octet-stream")
+        c1,c2=st.columns(2)
+        if dwg_bytes:
+            with c1:
+                st.download_button("Download floor_plan_clean.dwg",
+                    data=dwg_bytes,file_name="floor_plan_clean.dwg",
+                    mime="application/octet-stream",type="primary",
+                    use_container_width=True)
+        with c2:
+            st.download_button("Download floor_plan_clean.dxf",
+                data=dxf_bytes,file_name="floor_plan_clean.dxf",
+                mime="application/octet-stream",use_container_width=True)
 
 uploaded=st.file_uploader("Upload files",type=["dxf","dwg"],
     accept_multiple_files=True,label_visibility="collapsed")
