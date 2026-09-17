@@ -125,6 +125,109 @@ def map_layer(src, et="LINE"):
 def text_layer(src):
     return "S-GRID-IDEN" if is_grid_layer(src) else "A-ANNO-TEXT"
 
+_GRID_ID=re.compile(r"^([A-Z]{1,2}|\d{1,3}(\.\d)?|[A-Z]\.?\d{1,2}|\d{1,2}[A-Z]|[A-Z]{1,2}-?\d{1,2})$")
+# Whole-word note-speak and construction-material callouts → not labels
+_NOTE_WORDS={"SEE","TYP","TYPICAL","NOTE","NOTES","REF","SIM","UNO","MIN","MAX","PROVIDE",
+    "VERIFY","MATCH","ALIGN","SCALE","NTS","DETAIL","SECTION","CLR","OC","AFF","CONTRACTOR",
+    "SHALL","INSTALL","FURNISH","COORDINATE","APPROX","EQ","EQUAL","DRAWING","DWG","SHEET",
+    "REVISION","REV","DRAWN","CHECKED","DIM","DIMS","DIMENSION","ELEVATION","FFE","TOS","BOS",
+    "GYP","GWB","CONC","CMU","STUD","PLYWD","PLYWOOD","SLAB","FTG","FOOTING","JOIST",
+    "SHEATHING","INSUL","INSULATION","CAULK","SEALANT","FLASHING","PAINT","FINISH","VCT",
+    "CARPET","GRANITE","SOFFIT","PARAPET","CURB","SLOPE","DN","UP","RO","ROUGH","OPENING",
+    "HDR","HEADER","SILL","LINTEL"}
+_ROOMLIKE=re.compile(r"^[A-ZÁÉÍÓÚÑ&/.\- ]+( ?[A-Z]{0,3}-?\d{1,3}[A-Z]?)?$")
+def is_grid_id(txt):
+    return bool(_GRID_ID.match(txt.strip().upper()))
+def is_room_label(txt):
+    """Keep text that reads like a room / area / equipment label
+    (KITCHEN, TIRE CENTER, EV CHARGER, MTL COLUMN, PANEL LP-1, BAY 3)."""
+    s=txt.strip().upper()
+    if not (2<=len(s)<=40): return False
+    if any(ch in s for ch in '=@#%$<>{}[]|\\"°'): return False
+    if "'" in s or '"' in s: return False           # feet / inch marks
+    if len(s.split())>4: return False
+    words=set(re.findall(r"[A-Z]+",s))
+    if words & _NOTE_WORDS: return False
+    letters=sum(ch.isalpha() for ch in s)
+    if letters/len(s)<0.6: return False
+    return bool(_ROOMLIKE.fullmatch(s))
+
+def leaf_geom(ve, flat):
+    """WCS geometry of a leaf entity: handles OCS / mirrored extrusions.
+    Returns ('line',p1,p2) | ('poly',pts,closed) | ('circle',c,r) | ('arc',c,r,s,e) | None."""
+    t=ve.dxftype()
+    if t=="LINE":
+        return ("line",(ve.dxf.start.x,ve.dxf.start.y),(ve.dxf.end.x,ve.dxf.end.y))
+    if t=="LWPOLYLINE":
+        pts=[(v.x,v.y) for v in ve.vertices_in_wcs()]
+        return ("poly",pts,ve.is_closed) if len(pts)>1 else None
+    if t=="POLYLINE" and ve.is_2d_polyline:
+        ocs=ve.ocs(); pts=[]
+        for p in ve.points():
+            w=ocs.to_wcs(p); pts.append((w.x,w.y))
+        return ("poly",pts,ve.is_closed) if len(pts)>1 else None
+    if t=="CIRCLE":
+        cw=ve.ocs().to_wcs(ve.dxf.center); return ("circle",(cw.x,cw.y),ve.dxf.radius)
+    if t=="ARC":
+        cw=ve.ocs().to_wcs(ve.dxf.center); s=ve.start_point; e=ve.end_point
+        s=(s.x,s.y); e=(e.x,e.y)
+        if ve.dxf.extrusion.z<0: s,e=e,s          # OCS flip reverses direction
+        return ("arc",(cw.x,cw.y),ve.dxf.radius,s,e)
+    if t in ("ELLIPSE","SPLINE"):
+        try: pts=[(p.x,p.y) for p in ve.flattening(flat)]
+        except: return None
+        return ("poly",pts,False) if len(pts)>1 else None
+    return None
+
+def geom_mid(g):
+    k=g[0]
+    if k=="line": return ((g[1][0]+g[2][0])/2,(g[1][1]+g[2][1])/2)
+    if k=="poly": return (sum(p[0] for p in g[1])/len(g[1]),sum(p[1] for p in g[1])/len(g[1]))
+    return g[1]
+
+def geom_bbox(g):
+    k=g[0]
+    if k=="line": xs=(g[1][0],g[2][0]); ys=(g[1][1],g[2][1])
+    elif k=="poly": xs=[p[0] for p in g[1]]; ys=[p[1] for p in g[1]]
+    else: (cx,cy),r=g[1],g[2]; xs=(cx-r,cx+r); ys=(cy-r,cy+r)
+    return min(xs),max(xs),min(ys),max(ys)
+
+def write_leaf(out_msp,g,attrs,PT=None,reflect=False):
+    PT=PT or (lambda x,y:(x,y))
+    k=g[0]
+    if k=="line":
+        out_msp.add_line(PT(*g[1]),PT(*g[2]),dxfattribs=attrs)
+    elif k=="poly":
+        out_msp.add_lwpolyline([PT(*p) for p in g[1]],dxfattribs={**attrs,"closed":g[2]})
+    elif k=="circle":
+        out_msp.add_circle(center=PT(*g[1]),radius=g[2],dxfattribs=attrs)
+    elif k=="arc":
+        c=PT(*g[1]); s=PT(*g[3]); e=PT(*g[4])
+        sa=math.degrees(math.atan2(s[1]-c[1],s[0]-c[0]))%360
+        ea=math.degrees(math.atan2(e[1]-c[1],e[0]-c[0]))%360
+        if reflect: sa,ea=ea,sa
+        out_msp.add_arc(center=c,radius=g[2],start_angle=sa,end_angle=ea,dxfattribs=attrs)
+
+def iter_leaves(ents, doc, max_depth, ceil_fn=None, skip=()):
+    """Yield (leaf_entity, in_ceil) walking INSERTs with ezdxf's own resolver,
+    so base points, mirrored inserts, non-uniform scale and OCS are all right."""
+    def rec(es, d, in_ceil):
+        for e in es:
+            try:
+                lay=getattr(e.dxf,'layer','0')
+                if lay in skip: continue
+                if e.dxftype()=="INSERT":
+                    if d>=max_depth or e.dxf.name not in doc.blocks: continue
+                    nxt=in_ceil or (ceil_fn(lay) if ceil_fn else False)
+                    try: sub=e.virtual_entities()
+                    except Exception: continue
+                    yield from rec(sub,d+1,nxt)
+                    continue
+                yield e,in_ceil
+            except Exception:
+                continue
+    yield from rec(ents,0,False)
+
 def sheet_score(name):
     n = name.lower()
     if any(k in n for k in ["floor plan","ground","a101","a-1"]): return 2
@@ -577,177 +680,38 @@ def process_files(uploaded_files):
         if closed is not None: d["closed"]=closed
         return d
 
+    flat=max(plan_w/4000.0,0.01)
+    zx=max(z[1] for z in zones)-min(z[0] for z in zones)
+    zy=max(z[3] for z in zones)-min(z[2] for z in zones)
+    ezones=[(X1-0.25*zx,X2+0.25*zx,Y1-0.25*zy,Y2+0.25*zy) for X1,X2,Y1,Y2 in zones]
+    def inzone(x,y,zs=zones): return any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in zs)
+    def bbox_hits(b,zs=zones):
+        bx1,bx2,by1,by2=b
+        return any(bx1<=X2 and bx2>=X1 and by1<=Y2 and by2>=Y1 for X1,X2,Y1,Y2 in zs)
     if xref_name:
-        def ib(cx,cy): return all_x1<=cx<=all_x2 and all_y1<=cy<=all_y2
-        def explode(bn,ix,iy,sx,sy,rot,d=0):
-            if d>5 or ec[0]>80000: return
-            if bn not in doc_m.blocks: return
-            cr,sr=math.cos(rot),math.sin(rot)
-            def xf(px,py):
-                lx,ly=px*sx,py*sy
-                return ix+lx*cr-ly*sr,iy+lx*sr+ly*cr
-            for be in doc_m.blocks[bn]:
-                if ec[0]>80000: break
-                try:
-                    bl=getattr(be.dxf,'layer','0')
-                    if bl in SKIP: continue
-                    bt=be.dxftype()
-                    if bt=="LINE":
-                        p1=xf(be.dxf.start.x,be.dxf.start.y)
-                        p2=xf(be.dxf.end.x,be.dxf.end.y)
-                        if ib((p1[0]+p2[0])/2,(p1[1]+p2[1])/2):
-                            out_msp.add_line(p1,p2,dxfattribs=A(bl,bt))
-                            ec[0]+=1
-                    elif bt=="LWPOLYLINE":
-                        pts=list(be.get_points())
-                        if pts:
-                            tp=[xf(p[0],p[1]) for p in pts]
-                            if ib(sum(p[0] for p in tp)/len(tp),sum(p[1] for p in tp)/len(tp)):
-                                out_msp.add_lwpolyline(tp,dxfattribs=A(bl,bt,be.is_closed))
-                                ec[0]+=1
-                    elif bt=="ARC":
-                        nc=xf(be.dxf.center.x,be.dxf.center.y)
-                        if ib(nc[0],nc[1]):
-                            out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
-                                start_angle=be.dxf.start_angle+math.degrees(rot),
-                                end_angle=be.dxf.end_angle+math.degrees(rot),
-                                dxfattribs=A(bl,bt))
-                            ec[0]+=1
-                    elif bt=="CIRCLE":
-                        nc=xf(be.dxf.center.x,be.dxf.center.y)
-                        if ib(nc[0],nc[1]):
-                            out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
-                                dxfattribs=A(bl,bt))
-                            ec[0]+=1
-                    elif bt=="SPLINE":
-                        sp=list(be.control_points)
-                        if sp:
-                            tp=[xf(p[0],p[1]) for p in sp]
-                            if ib(sum(p[0] for p in tp)/len(tp),sum(p[1] for p in tp)/len(tp)):
-                                out_msp.add_lwpolyline(tp,dxfattribs=A(bl,bt))
-                                ec[0]+=1
-                    elif bt=="INSERT":
-                        ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                        if ib(ni,nj):
-                            explode(be.dxf.name,ni,nj,
-                                sx*getattr(be.dxf,'xscale',1.0),
-                                sy*getattr(be.dxf,'yscale',1.0),
-                                rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
-                except: pass
+        MAXD,CAP=6,80000
+        def ib(x,y): return all_x1<=x<=all_x2 and all_y1<=y<=all_y2
     else:
-        def explode(bn,ix,iy,sx,sy,rot,d=0):
-            if d>5: return
-            if bn not in doc_m.blocks: return
-            cr,sr=math.cos(rot),math.sin(rot)
-            def xf(px,py):
-                lx,ly=px*sx,py*sy
-                return ix+lx*cr-ly*sr,iy+lx*sr+ly*cr
-            for be in doc_m.blocks[bn]:
-                try:
-                    bl=getattr(be.dxf,'layer','0')
-                    if bl in SKIP: continue
-                    bt=be.dxftype()
-                    if bt=="LINE":
-                        out_msp.add_line(xf(be.dxf.start.x,be.dxf.start.y),
-                            xf(be.dxf.end.x,be.dxf.end.y),
-                            dxfattribs=A(bl,bt))
-                        ec[0]+=1
-                    elif bt=="LWPOLYLINE":
-                        pts=list(be.get_points())
-                        if pts:
-                            out_msp.add_lwpolyline([xf(p[0],p[1]) for p in pts],
-                                dxfattribs=A(bl,bt,be.is_closed))
-                            ec[0]+=1
-                    elif bt=="ARC":
-                        nc=xf(be.dxf.center.x,be.dxf.center.y)
-                        out_msp.add_arc(center=nc,radius=be.dxf.radius*sx,
-                            start_angle=be.dxf.start_angle+math.degrees(rot),
-                            end_angle=be.dxf.end_angle+math.degrees(rot),
-                            dxfattribs=A(bl,bt))
-                        ec[0]+=1
-                    elif bt=="CIRCLE":
-                        nc=xf(be.dxf.center.x,be.dxf.center.y)
-                        out_msp.add_circle(center=nc,radius=be.dxf.radius*sx,
-                            dxfattribs=A(bl,bt))
-                        ec[0]+=1
-                    elif bt=="SPLINE":
-                        sp=list(be.control_points)
-                        if sp:
-                            out_msp.add_lwpolyline([xf(p[0],p[1]) for p in sp],
-                                dxfattribs=A(bl,bt))
-                            ec[0]+=1
-                    elif bt=="INSERT":
-                        ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                        explode(be.dxf.name,ni,nj,
-                            sx*getattr(be.dxf,'xscale',1.0),
-                            sy*getattr(be.dxf,'yscale',1.0),
-                            rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
-                except: pass
+        MAXD,CAP=6,None
+        def ib(x,y): return True
 
     copied=0
-    for e in msp_m:
+    # Top-level entities in their own right, plus everything inside blocks.
+    for ve,_ in iter_leaves(msp_m, doc_m, MAXD, skip=set(SKIP)):
+        if CAP and ec[0]>CAP: break
         try:
-            layer=getattr(e.dxf,'layer','0')
-            if layer in SKIP: continue
-            t=e.dxftype()
-            for (X1,X2,Y1,Y2) in zones:
-                placed=False
-                if t=="LINE":
-                    sx_,sy_=e.dxf.start.x,e.dxf.start.y
-                    ex_,ey_=e.dxf.end.x,e.dxf.end.y
-                    if is_grid_layer(layer):
-                        # grid lines run past the plan: keep if the segment
-                        # bbox overlaps the zone at all
-                        bx1,bx2=min(sx_,ex_),max(sx_,ex_); by1,by2=min(sy_,ey_),max(sy_,ey_)
-                        hit = bx1<=X2 and bx2>=X1 and by1<=Y2 and by2>=Y1
-                    else:
-                        cx=(sx_+ex_)/2; cy=(sy_+ey_)/2
-                        hit = X1<=cx<=X2 and Y1<=cy<=Y2
-                    if hit:
-                        out_msp.add_line((sx_,sy_),(ex_,ey_),dxfattribs=A(layer,t))
-                        placed=True
-                elif t=="LWPOLYLINE":
-                    pts=list(e.get_points())
-                    if pts:
-                        cx=sum(p[0] for p in pts)/len(pts)
-                        cy=sum(p[1] for p in pts)/len(pts)
-                        if X1<=cx<=X2 and Y1<=cy<=Y2:
-                            out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
-                                dxfattribs=A(layer,t,e.is_closed))
-                            placed=True
-                elif t=="ARC":
-                    cx,cy=e.dxf.center.x,e.dxf.center.y
-                    if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        out_msp.add_arc(center=(cx,cy),radius=e.dxf.radius,
-                            start_angle=e.dxf.start_angle,end_angle=e.dxf.end_angle,
-                            dxfattribs=A(layer,t))
-                        placed=True
-                elif t=="CIRCLE":
-                    cx,cy=e.dxf.center.x,e.dxf.center.y
-                    if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        out_msp.add_circle(center=(cx,cy),radius=e.dxf.radius,
-                            dxfattribs=A(layer,t))
-                        placed=True
-                elif t=="SPLINE":
-                    pts=list(e.control_points)
-                    if pts:
-                        cx=sum(p[0] for p in pts)/len(pts)
-                        cy=sum(p[1] for p in pts)/len(pts)
-                        if X1<=cx<=X2 and Y1<=cy<=Y2:
-                            out_msp.add_lwpolyline([(p[0],p[1]) for p in pts],
-                                dxfattribs=A(layer,t))
-                            placed=True
-                elif t=="INSERT":
-                    cx,cy=e.dxf.insert.x,e.dxf.insert.y
-                    if X1<=cx<=X2 and Y1<=cy<=Y2:
-                        explode(e.dxf.name,cx,cy,
-                            getattr(e.dxf,'xscale',1.0),
-                            getattr(e.dxf,'yscale',1.0),
-                            math.radians(getattr(e.dxf,'rotation',0.0)))
-                        placed=True
-                if placed:
-                    copied+=1
-                    break
+            layer=getattr(ve.dxf,'layer','0')
+            g=leaf_geom(ve,flat)
+            if g is None: continue
+            et="LWPOLYLINE" if g[0]=="poly" else ("CIRCLE" if g[0]=="circle" else ("ARC" if g[0]=="arc" else "LINE"))
+            if is_grid_layer(layer):
+                # grid lines run past the plan; bubbles sit just outside it
+                ok = bbox_hits(geom_bbox(g)) if g[0] in ("line","poly") else inzone(*g[1],ezones)
+            else:
+                ok = inzone(*geom_mid(g)) and ib(*geom_mid(g))
+            if not ok: continue
+            write_leaf(out_msp,g,A(layer,et))
+            ec[0]+=1
         except: pass
 
     # ── LABELS ────────────────────────────────────────────────────────────────
@@ -763,14 +727,23 @@ def process_files(uploaded_files):
                     else:
                         txt=clean_mtext(e.text); ix,iy=e.dxf.insert.x,e.dxf.insert.y
                         txt_rot=getattr(e.dxf,'rotation',0.0); h=getattr(e.dxf,'char_height',20)
-                    if len(txt)<2: continue
-                    for (X1,X2,Y1,Y2) in zones:
-                        if X1<=ix<=X2 and Y1<=iy<=Y2:
-                            out_msp.add_text(txt[:50],dxfattribs={
-                                "layer":text_layer(getattr(e.dxf,'layer','')),"color":256,
-                                "insert":(ix,iy),"height":h,"rotation":txt_rot})
-                            placed_labels+=1
-                            break
+                    if len(txt)<1: continue
+                    src_lay=getattr(e.dxf,'layer','')
+                    if is_grid_layer(src_lay) and len(txt)<=4:
+                        lay_out,zs="S-GRID-IDEN",ezones
+                    elif is_grid_id(txt):
+                        # grid ids off a grid layer must sit in the ring outside the plan
+                        if inzone(ix,iy,zones): continue
+                        lay_out,zs="S-GRID-IDEN",ezones
+                    elif is_room_label(txt):
+                        lay_out,zs="A-ANNO-TEXT",zones
+                    else:
+                        continue
+                    if inzone(ix,iy,zs):
+                        out_msp.add_text(txt[:50],dxfattribs={
+                            "layer":lay_out,"color":256,
+                            "insert":(ix,iy),"height":h,"rotation":txt_rot})
+                        placed_labels+=1
             except: pass
     else:
         # Xref: try A-1 transform first (works with ODA), then Master text fallback
@@ -784,11 +757,15 @@ def process_files(uploaded_files):
                     else:
                         txt=clean_mtext(e.text); ix,iy=e.dxf.insert.x,e.dxf.insert.y
                         txt_rot=getattr(e.dxf,'rotation',0.0); h=getattr(e.dxf,'char_height',20)
-                    if len(txt)<2: continue
+                    if len(txt)<1: continue
+                    src_lay=getattr(e.dxf,'layer','')
+                    if is_grid_id(txt) or (is_grid_layer(src_lay) and len(txt)<=4): lay_out="S-GRID-IDEN"
+                    elif is_room_label(txt): lay_out="A-ANNO-TEXT"
+                    else: continue
                     mx,my=a1_to_master(ix,iy)
                     txt_rot=txt_rot-math.degrees(xref_rot)
                     if my<1000:
-                        tl.append((mx,my,txt,h*xref_sx,txt_rot,text_layer(getattr(e.dxf,'layer',''))))
+                        tl.append((mx,my,txt,h*xref_sx,txt_rot,lay_out))
             except: pass
         # Fallback: read directly from Master, find nearest X cluster to zone
         if not tl:
@@ -942,34 +919,17 @@ def process_files(uploaded_files):
             _insrc=(lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in rcp_zones)) if rcp_zones else (lambda x,y: True)
 
             # 3. Sample the RCP geometry (raw source coords) + which are walls
-            def _walk_pts(limit=30000):
-                out=[]
-                def walk(ents,ix,iy,sx,sy,rot,d):
-                    if d>3 or len(out)>=limit: return
-                    cr,sr=math.cos(rot),math.sin(rot)
-                    def xf(px,py):
-                        lx,ly=px*sx,py*sy
-                        return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
-                    for be in ents:
-                        if len(out)>=limit: return
-                        try:
-                            bt=be.dxftype(); lay=getattr(be.dxf,'layer','').upper()
-                            w=any(k in lay for k in _WALLKW)
-                            if bt=="LINE":
-                                p1=xf(be.dxf.start.x,be.dxf.start.y); p2=xf(be.dxf.end.x,be.dxf.end.y)
-                                out.append(((p1[0]+p2[0])/2,(p1[1]+p2[1])/2,w))
-                            elif bt=="LWPOLYLINE":
-                                pts=[xf(p[0],p[1]) for p in be.get_points()]
-                                for a,b in zip(pts,pts[1:]): out.append(((a[0]+b[0])/2,(a[1]+b[1])/2,w))
-                            elif bt=="INSERT" and be.dxf.name in src_doc.blocks:
-                                ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                                walk(src_doc.blocks[be.dxf.name],ni,nj,
-                                     sx*getattr(be.dxf,'xscale',1.0),sy*getattr(be.dxf,'yscale',1.0),
-                                     rot+math.radians(getattr(be.dxf,'rotation',0.0)),d+1)
-                        except: pass
-                walk(src_msp,0,0,1,1,0,0)
-                return out
-            _all=[p for p in _walk_pts() if _insrc(p[0],p[1])]
+            _all=[]
+            for ve,_ in iter_leaves(src_msp,src_doc,4,skip=set(SKIP)):
+                if len(_all)>=40000: break
+                try:
+                    g=leaf_geom(ve,flat)
+                    if g is None or g[0] not in ("line","poly"): continue
+                    m=geom_mid(g)
+                    if not _insrc(*m): continue
+                    lay=getattr(ve.dxf,'layer','').upper()
+                    _all.append((m[0],m[1],any(k in lay for k in _WALLKW)))
+                except: pass
             _wpts=[(x,y) for x,y,w in _all if w]
             rbox=_bbox(_wpts) if len(_wpts)>=20 else _bbox([(x,y) for x,y,_ in _all])
 
@@ -987,92 +947,21 @@ def process_files(uploaded_files):
             def T(x,y):
                 x2=x+tx; y2=y+ty
                 return ((2*floor_cx-x2) if use_mirror else x2), y2
-            def mira(sa,ea):
-                return ((180-ea)%360,(180-sa)%360) if use_mirror else (sa,ea)
-            _inz=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in zones)
 
-            # 6. Extract: raw world coords through the block tree, T() at the leaf
+            # 6. Extract ceiling leaves, transform at the leaf
             rcp_ec=[0]; RA={"layer":"A-RCP","color":256}
-            def explode_rcp(bn,ix,iy,sx,sy,rot,d=0,in_ceil=False):
-                if d>4 or rcp_ec[0]>60000: return
-                if bn not in src_doc.blocks: return
-                cr,sr=math.cos(rot),math.sin(rot)
-                def xf(px,py):
-                    lx,ly=px*sx,py*sy
-                    return ix+lx*cr-ly*sr, iy+lx*sr+ly*cr
-                for be in src_doc.blocks[bn]:
-                    if rcp_ec[0]>60000: break
-                    try:
-                        bl=getattr(be.dxf,'layer','0')
-                        if bl in SKIP: continue
-                        bt=be.dxftype()
-                        if bt=="INSERT":
-                            ni,nj=xf(be.dxf.insert.x,be.dxf.insert.y)
-                            explode_rcp(be.dxf.name,ni,nj,
-                                sx*getattr(be.dxf,'xscale',1.0),sy*getattr(be.dxf,'yscale',1.0),
-                                rot+math.radians(getattr(be.dxf,'rotation',0.0)),
-                                d+1,in_ceil or is_ceiling_layer(bl))
-                            continue
-                        if bl in RCP_GRID: continue
-                        if not in_ceil and not is_ceiling_layer(bl): continue
-                        if bt=="LINE":
-                            p1=xf(be.dxf.start.x,be.dxf.start.y); p2=xf(be.dxf.end.x,be.dxf.end.y)
-                            m=((p1[0]+p2[0])/2,(p1[1]+p2[1])/2)
-                            if _insrc(*m) and _inz(*T(*m)):
-                                out_msp.add_line(T(*p1),T(*p2),dxfattribs=RA); rcp_ec[0]+=1
-                        elif bt=="LWPOLYLINE":
-                            pts=[xf(p[0],p[1]) for p in be.get_points()]
-                            if pts:
-                                m=(sum(p[0] for p in pts)/len(pts),sum(p[1] for p in pts)/len(pts))
-                                if _insrc(*m) and _inz(*T(*m)):
-                                    out_msp.add_lwpolyline([T(*p) for p in pts],
-                                        dxfattribs={**RA,"closed":be.is_closed}); rcp_ec[0]+=1
-                        elif bt=="ARC":
-                            nc=xf(be.dxf.center.x,be.dxf.center.y)
-                            if _insrc(*nc) and _inz(*T(*nc)):
-                                sa,ea=mira(be.dxf.start_angle+math.degrees(rot),be.dxf.end_angle+math.degrees(rot))
-                                out_msp.add_arc(center=T(*nc),radius=be.dxf.radius*sx,
-                                    start_angle=sa,end_angle=ea,dxfattribs=RA); rcp_ec[0]+=1
-                        elif bt=="CIRCLE":
-                            nc=xf(be.dxf.center.x,be.dxf.center.y)
-                            if _insrc(*nc) and _inz(*T(*nc)):
-                                out_msp.add_circle(center=T(*nc),radius=be.dxf.radius*sx,dxfattribs=RA); rcp_ec[0]+=1
-                    except: pass
-            for e in src_msp:
+            for ve,in_ceil in iter_leaves(src_msp,src_doc,5,ceil_fn=is_ceiling_layer,skip=set(SKIP)):
+                if rcp_ec[0]>60000: break
                 try:
-                    layer=getattr(e.dxf,'layer','0')
-                    if layer in SKIP: continue
-                    t=e.dxftype()
-                    if t!="INSERT" and layer in RCP_GRID: continue
-                    if t!="INSERT" and not is_ceiling_layer(layer): continue
-                    if t=="LINE":
-                        p1=(e.dxf.start.x,e.dxf.start.y); p2=(e.dxf.end.x,e.dxf.end.y)
-                        m=((p1[0]+p2[0])/2,(p1[1]+p2[1])/2)
-                        if _insrc(*m) and _inz(*T(*m)):
-                            out_msp.add_line(T(*p1),T(*p2),dxfattribs=RA); rcp_ec[0]+=1
-                    elif t=="LWPOLYLINE":
-                        pts=[(p[0],p[1]) for p in e.get_points()]
-                        if pts:
-                            m=(sum(p[0] for p in pts)/len(pts),sum(p[1] for p in pts)/len(pts))
-                            if _insrc(*m) and _inz(*T(*m)):
-                                out_msp.add_lwpolyline([T(*p) for p in pts],
-                                    dxfattribs={**RA,"closed":e.is_closed}); rcp_ec[0]+=1
-                    elif t=="ARC":
-                        nc=(e.dxf.center.x,e.dxf.center.y)
-                        if _insrc(*nc) and _inz(*T(*nc)):
-                            sa,ea=mira(e.dxf.start_angle,e.dxf.end_angle)
-                            out_msp.add_arc(center=T(*nc),radius=e.dxf.radius,
-                                start_angle=sa,end_angle=ea,dxfattribs=RA); rcp_ec[0]+=1
-                    elif t=="CIRCLE":
-                        nc=(e.dxf.center.x,e.dxf.center.y)
-                        if _insrc(*nc) and _inz(*T(*nc)):
-                            out_msp.add_circle(center=T(*nc),radius=e.dxf.radius,dxfattribs=RA); rcp_ec[0]+=1
-                    elif t=="INSERT":
-                        # follow every insert; leaves decide by zone
-                        explode_rcp(e.dxf.name,e.dxf.insert.x,e.dxf.insert.y,
-                            getattr(e.dxf,'xscale',1.0),getattr(e.dxf,'yscale',1.0),
-                            math.radians(getattr(e.dxf,'rotation',0.0)),
-                            0,is_ceiling_layer(layer))
+                    lay=getattr(ve.dxf,'layer','0')
+                    if lay in RCP_GRID: continue
+                    if not in_ceil and not is_ceiling_layer(lay): continue
+                    g=leaf_geom(ve,flat)
+                    if g is None: continue
+                    m=geom_mid(g)
+                    if not (_insrc(*m) and inzone(*T(*m))): continue
+                    write_leaf(out_msp,g,RA,PT=T,reflect=use_mirror)
+                    rcp_ec[0]+=1
                 except: pass
             rcp_count+=rcp_ec[0]
             rcp_names.append(
