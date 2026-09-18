@@ -571,7 +571,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
     all_x1=min(z[0] for z in zones)-200; all_x2=max(z[1] for z in zones)+200
     all_y1=min(z[2] for z in zones)-200; all_y2=max(z[3] for z in zones)+200
 
-    out=ezdxf.new("R2018", setup=True)     # setup=True loads CENTER/DASHED linetypes
+    out=ezdxf.new("R2000", setup=True)     # setup=True loads CENTER/DASHED linetypes
     for lname,(col,lt,lw) in OUT_LAYERS.items():
         if lname not in out.layers:
             L=out.layers.new(lname)
@@ -764,11 +764,9 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
     floor_cx=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
     inzone=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in zones)
 
-    scratch=ezdxf.new("R2018"); sm=scratch.modelspace()
-    for ln,col in (("A-CLNG",9),("A-CLNG-PATT",9),("E-LITE-EQPM",33)):
+    scratch=ezdxf.new("R2000"); sm=scratch.modelspace()
+    for ln,col in (("A-CLNG",9),("E-LITE-EQPM",33)):
         scratch.layers.new(ln).color=col
-    from ezdxf.math import Matrix44
-    from ezdxf import bbox as _bbx
     doc_rcp=ezdxf.readfile(str(rcp_path)); msp_rcp=doc_rcp.modelspace()
     src_doc,src_msp,src_name=doc_rcp,msp_rcp,"self"
     rx=None
@@ -826,38 +824,24 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
     def T(x,y):
         x2=x+tx; y2=y+ty
         return ((2*floor_cx-x2) if use_mirror else x2), y2
-    Mt=Matrix44.translate(tx,ty,0)
-    if use_mirror: Mt=Mt @ (Matrix44.scale(-1,1,1) @ Matrix44.translate(2*floor_cx,0,0))
-    n=0; nh=0
+    n=0
     for ve,in_ceil in iter_leaves(src_msp,src_doc,5,ceil_fn=is_ceiling_layer,skip=set(SKIP)):
         if n>60000: break
         try:
             lay=getattr(ve.dxf,'layer','0')
             if lay in RCP_GRID: continue
             if not in_ceil and not is_ceiling_layer(lay): continue
-            u=lay.upper()
-            if ve.dxftype()=="HATCH":
-                # false ceiling / tile pattern: keep it a HATCH, transform boundaries + pattern
-                try:
-                    bb=_bbx.extents([ve]); cxh,cyh=bb.center.x,bb.center.y
-                    if not (_insrc(cxh,cyh) and inzone(*T(cxh,cyh))): continue
-                    h=ve.copy(); sm.add_entity(h)
-                    h.dxf.layer="A-CLNG-PATT" if "PATT" in u else "A-CLNG"; h.dxf.color=256
-                    h.dxf.associative=0
-                    h.transform(Mt); nh+=1
-                except Exception:
-                    pass
-                continue
             g=leaf_geom(ve,flat)
             if g is None: continue
             m=geom_mid(g)
             if not (_insrc(*m) and inzone(*T(*m))): continue
+            u=lay.upper()
             target="E-LITE-EQPM" if any(k in u for k in ("LITE","LIGHT","LAMP","LUM")) else "A-CLNG"
             write_leaf(sm,g,{"layer":target,"color":256},PT=T,reflect=use_mirror); n+=1
         except: pass
     diag=(f"{rcp_path.name} [src={src_name}, vp={len(rcp_zones)}, pts={len(_all)}, walls={len(_wpts)}, "
           f"shift=({tx:.0f},{ty:.0f}), align={score_align}/mirror={score_mirror} → "
-          f"{'mirrored' if use_mirror else 'aligned'}, added={n} + {nh} ceiling hatches]")
+          f"{'mirrored' if use_mirror else 'aligned'}, added={n}]")
     return scratch, diag
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -869,20 +853,18 @@ _PERSHEET_LABEL=("SHEET NO","SHEET NUMBER","HOJA","TITLE","TITULO","TÍTULO","SH
 _DATE_LABEL=("DATE","FECHA")
 
 def extract_marco(sheet_path):
-    """Pull the border out of the architect's sheet exactly as it is drawn
-    (text styles, MTEXT widths, rotations), explode it, drop logo + firm
-    identity, keep the frame and project-constant fields, leave sheet number
-    and title out (they are written per layout)."""
+    """Pull the border out of the architect's sheet:
+       explode the border block, drop logo + firm identity, keep the frame and the
+       project-constant fields, leave sheet number / title out (they go per layout)."""
     import datetime
-    from ezdxf.addons import Importer
     a=ezdxf.readfile(str(sheet_path))
-    marco=ezdxf.new("R2018",setup=True); mm=marco.modelspace()
+    marco=ezdxf.new("R2000",setup=True); mm=marco.modelspace()
     for ln,col in (("G-ANNO-TTLB",6),("G-ANNO-TTLB-WIDE",214),("E-TEXTR",3),("E-MEDIUM",7),("E-TEXTS",2),("SHT-TXT1",4)):
         if ln not in marco.layers: marco.layers.new(ln).color=col
-    info=dict(found=False, col_center=33.9, right=35.5, top=23.5, paper=(36.0,24.0), border_name=None, src=a,
-              sheetno=dict(insert=(34.38,1.12),h=0.236,w=0.94,att=1,style="Standard"),
-              title=dict(insert=(33.9,2.95),h=0.118,w=2.5,att=2,style="Standard"),
-              vt_style="Standard")
+    info=dict(found=False, col_center=33.9, sheetno_pos=(34.38,1.12), sheetno_h=0.236,
+              title_pos=(33.9,2.95), title_h=0.118, title_w=2.5, right=35.5, top=23.5,
+              paper=(36.0,24.0), border_name=None)
+    # pick the layout with the biggest viewport = the sheet
     best=None; best_area=0
     for lay in a.layouts:
         if lay.name=="Model": continue
@@ -891,6 +873,7 @@ def extract_marco(sheet_path):
                 ar=e.dxf.width*e.dxf.height
                 if ar>best_area: best_area=ar; best=lay
     if best is None: return marco, info
+    # border block = INSERT in that layout with the largest exploded extents
     def ins_extent(e):
         xs=[];ys=[]
         try:
@@ -905,79 +888,83 @@ def extract_marco(sheet_path):
             ext=ins_extent(e)
             if ext and (bext is None or (ext[1]-ext[0])*(ext[3]-ext[2])>(bext[1]-bext[0])*(bext[3]-bext[2])):
                 border,bext=e,ext
-    if border is None or (bext[1]-bext[0])<10: return marco, info
-    info["found"]=True; info["border_name"]=border.dxf.name
+    frame=[]; labels=[]; images=[]
+    if border is not None and (bext[1]-bext[0])>10:
+        info["found"]=True; info["border_name"]=border.dxf.name
+        for ve in border.virtual_entities():
+            t=ve.dxftype()
+            if t=="IMAGE":
+                try: p=ve.dxf.insert; images.append((p.x,p.y))
+                except: pass
+                continue
+            if t in ("MTEXT","TEXT"):
+                s=clean_mtext(ve.text) if t=="MTEXT" else ve.dxf.text
+                labels.append((ve,s))
+            else:
+                frame.append(ve)
+        # attributes on the border, if any
+        for at in (border.attribs or []):
+            labels.append((at, at.dxf.text))
+    else:
+        return marco, info
+    # what the sheet knows about itself
     right=bext[1]; top=bext[3]; info["right"]=right; info["top"]=top
     info["paper"]=(round(bext[1]+bext[0],1), round(bext[3]+bext[2],1))
-    # logo zone from any IMAGE inside the border block (before exploding)
-    logo=None
-    try:
-        for x in a.blocks[border.dxf.name]:
-            if x.dxftype()=="IMAGE":
-                p=x.dxf.insert; logo=(p.x+border.dxf.insert.x,p.y+border.dxf.insert.y); break
-    except: pass
-    # bring the border + the loose sheet texts across WITH their styles
-    imp=Importer(a,marco)
-    imp.import_block(border.dxf.name)
-    ins=mm.add_blockref(border.dxf.name,(border.dxf.insert.x,border.dxf.insert.y),
-                        dxfattribs={"xscale":border.dxf.xscale,"yscale":border.dxf.yscale,"rotation":border.dxf.rotation})
-    loose=[e for e in best if e.dxftype() in ("MTEXT","TEXT")]
-    imp.import_entities(loose,mm); imp.finalize()
-    loose_handles={e.dxf.handle for e in mm if e.dxftype() in ("MTEXT","TEXT")}
-    ins.explode()
-    for e in list(mm):
-        if e.dxftype() in ("IMAGE","WIPEOUT"): mm.delete_entity(e)
-    # title column = long vertical line nearest the right edge
+    # title column = the long vertical line nearest the right edge
     col_x=right-3.5
-    for e in mm:
-        if e.dxftype()=="LINE":
-            x1,y1,x2,y2=e.dxf.start.x,e.dxf.start.y,e.dxf.end.x,e.dxf.end.y
+    for ve in frame:
+        if ve.dxftype()=="LINE":
+            (x1,y1),(x2,y2)=(ve.dxf.start.x,ve.dxf.start.y),(ve.dxf.end.x,ve.dxf.end.y)
             if abs(x1-x2)<0.01 and abs(y2-y1)>0.6*(bext[3]-bext[2]) and right-6<x1<right-1: col_x=x1
     info["col_center"]=(col_x+right)/2
-    logo_zone=(col_x,right,logo[1]-0.6,top) if logo else (col_x,right,top-0.15*(bext[3]-bext[2]),top)
+    # logo region: around any IMAGE, else top ~15% of the title column
+    logo_zone=None
+    if images:
+        ix,iy=images[0]; logo_zone=(col_x,right,iy-0.6,top)
+    else:
+        logo_zone=(col_x,right,top-0.15*(bext[3]-bext[2]),top)
     def in_logo(x,y): return logo_zone[0]<=x<=logo_zone[1] and logo_zone[2]<=y<=logo_zone[3]
-    def txt_of(e): return (clean_mtext(e.text) if e.dxftype()=="MTEXT" else e.dxf.text).strip()
-    def pos_of(e): return e.dxf.insert.x,e.dxf.insert.y
-    texts=[e for e in mm if e.dxftype() in ("MTEXT","TEXT")]
-    labels=[(txt_of(e).upper().rstrip(":"),*pos_of(e)) for e in texts if txt_of(e).endswith(":")]
+    # frame geometry
+    for ve in frame:
+        g=leaf_geom(ve,0.02)
+        if g: write_leaf(mm,g,{"layer":ve.dxf.layer if ve.dxf.layer in marco.layers else "G-ANNO-TTLB","color":256})
+    # block labels: keep field labels + boilerplate, drop firm identity / logo text
+    label_pts=[]   # (label_text, x, y)
+    for ve,s in labels:
+        try: x,y=ve.dxf.insert.x,ve.dxf.insert.y
+        except: continue
+        su=s.strip().upper()
+        if in_logo(x,y) or _FIRM_RX.search(s): continue
+        h=ve.dxf.char_height if ve.dxftype()=="MTEXT" else ve.dxf.height
+        mm.add_text(s,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"insert":(x,y-h),"height":h})
+        if su.endswith(":"): label_pts.append((su.rstrip(":"),x,y))
+    # loose layout text (project name, address, date, sheet no, title...)
     def field_of(x,y):
-        best_l=None; bd=9e9
-        for lt,lx,ly in labels:
+        """Which label does a loose text belong to? nearest label above it in the column."""
+        best=None; bd=9e9
+        for lt,lx,ly in label_pts:
             if ly>=y-0.02 and ly-y<1.2 and abs(lx-x)<1.6:
                 d=(ly-y)+0.3*abs(lx-x)
-                if d<bd: bd=d; best_l=lt
-        return best_l
+                if d<bd: bd=d; best=lt
+        return best
     today=datetime.date.today().strftime("%Y-%b-%d").upper()
-    _DATE_RX=re.compile(r"(\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|\d{4}[-\s][A-Z]{3}[-\s]\d{1,2}|[A-Z]{3,9}\.? ?\d{1,2},? ?\d{4})",re.I)
-    title_lines=[]
-    for e in texts:
-        s=txt_of(e); x,y=pos_of(e)
-        if not s: mm.delete_entity(e); continue
-        if e.dxf.handle in loose_handles and x<col_x-0.5: mm.delete_entity(e); continue   # sheet's own view titles
-        if in_logo(x,y) or _FIRM_RX.search(s): mm.delete_entity(e); continue
-        # keep text inside the column: clamp widths that would cross the frame edge
-        if e.dxftype()=="MTEXT" and e.dxf.width and x+e.dxf.width>right-0.1:
-            e.dxf.width=max(0.5,right-0.1-x)
-        if s.endswith(":") or s.endswith("."): continue     # a field label / header: keep
+    for e in best:
+        t=e.dxftype()
+        if t not in ("MTEXT","TEXT"): continue
+        s=clean_mtext(e.text) if t=="MTEXT" else e.dxf.text
+        x,y=e.dxf.insert.x,e.dxf.insert.y
+        if x<col_x or not s.strip(): continue          # not in the title column
+        if in_logo(x,y) or _FIRM_RX.search(s): continue
         fld=field_of(x,y) or ""
-        spec=dict(insert=(x,y),h=(e.dxf.char_height if e.dxftype()=="MTEXT" else e.dxf.height),
-                  w=(e.dxf.width if e.dxftype()=="MTEXT" else 0),
-                  att=(e.dxf.attachment_point if e.dxftype()=="MTEXT" else 1),style=e.dxf.style)
+        h=e.dxf.char_height if t=="MTEXT" else e.dxf.height
         if any(k in fld for k in _PERSHEET_LABEL):
-            if "SHEET" in fld or "HOJA" in fld: info["sheetno"]=spec
-            else: title_lines.append(spec)
-            mm.delete_entity(e); continue
-        if any(k in fld for k in _DATE_LABEL) and _DATE_RX.search(s):
-            if e.dxftype()=="MTEXT": e.text=today
-            else: e.dxf.text=today
-    if title_lines:
-        t=max(title_lines,key=lambda d:d["insert"][1])            # first (top) line
-        info["title"]=dict(insert=(info["col_center"],t["insert"][1]+0.06),h=t["h"],w=(right-col_x)-0.4,att=2,style=t["style"])
-    # style for the view-title texts under plan viewports (architect's scale text)
-    for e in loose:
-        try:
-            if "=" in txt_of(e) and e.dxf.insert.x<col_x: info["vt_style"]=e.dxf.style; break
-        except: pass
+            if "SHEET" in fld or "HOJA" in fld:
+                info["sheetno_pos"]=(x,y); info["sheetno_h"]=h
+            else:
+                if y>info["title_pos"][1]-0.5: info["title_pos"]=(info["col_center"],y+0.1); info["title_h"]=h
+            continue                                       # per-sheet → not in marco
+        if any(k in fld for k in _DATE_LABEL): s=today
+        mm.add_text(s,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"insert":(x,y-h),"height":h})
     return marco, info
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -986,7 +973,7 @@ def extract_marco(sheet_path):
 E_LAYERS={"E-EQUIP":4,"E-EQUIP-EXIST":4,"E-HEAVY":4,"E-MEDIUM":7,"E-LIGHT":2,"E-XLIGHT":1,
           "E-LITE-EQPM":33,"E-LITE-EQPM-IDEN":33,"E-SWITCH":4,"E-TEXTL":6,"E-TEXTM":4,
           "E-TEXTR":3,"E-TEXTS":2,"E-DIM":2,"E-Wiring":4,"E-WIRING-F":4,"E-WIRINGF":4,
-          "E-WIREPOLES":3,"0-Vport":4,"G-ANNO-TTLB":6,"G-ANNO-NPLT":7,"A-CLNG":9,"A-CLNG-PATT":9,"E-SYMB":7}
+          "E-WIREPOLES":3,"0-Vport":4,"G-ANNO-TTLB":6,"G-ANNO-NPLT":7,"A-CLNG":9,"E-SYMB":7}
 E_LINETYPES={"E-WIRING-F":"DASHDOT","E-WIRINGF":"HIDDEN2","E-WIREPOLES":"DASHDOT2"}
 PLAN_SHEETS=[("E-101","ELECTRICAL LIGHTING PLAN"),("E-102","ELECTRICAL POWER PLAN"),
              ("E-103","DATA/TELECOMMUNICATIONS PLAN"),("E-104","FIRE ALARM SYSTEM PLAN")]
@@ -1001,16 +988,7 @@ def snap_sheet(w,h):
 
 def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, split_parts, fbox=None):
     import datetime
-    E=ezdxf.new("R2018",setup=True); msp=E.modelspace()
-    src=marco_info.get("src")
-    if src is not None:
-        try:
-            from ezdxf.addons import Importer
-            imp=Importer(src,E)
-            want={marco_info["sheetno"]["style"],marco_info["title"]["style"],marco_info.get("vt_style","Standard")}
-            imp.import_table("styles",entries=[s for s in want if s in src.styles]); imp.finalize()
-        except Exception: pass
-    def _style(name): return name if name in E.styles else "Standard"
+    E=ezdxf.new("R2000",setup=True); msp=E.modelspace()
     for ln,col in E_LAYERS.items():
         if ln not in E.layers:
             Lr=E.layers.new(ln); Lr.color=col
@@ -1018,9 +996,8 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     E.header["$INSUNITS"]=ins_units or 1
     E.header["$PSLTSCALE"]=1
     # xrefs — RELATIVE paths so the folder can live anywhere
-    # ATTACH (flag 4), exactly like the engineer's file — not overlay
-    E.add_xref_def(filename="x-plan.dwg",name="x-plan",flags=4)
-    E.add_xref_def(filename="x-marco.dwg",name="x-marco",flags=4)
+    E.add_xref_def(filename="x-plan.dwg",name="x-plan")
+    E.add_xref_def(filename="x-marco.dwg",name="x-marco")
 
     PW,PH=snap_sheet(*marco_info.get("paper",(36.0,24.0)))
     u_per_in=UNIT_PER_IN.get(ins_units,1.0)
@@ -1045,11 +1022,6 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     if rcp_scratch is not None:
         ox,oy=0.0,0.0
         for e in rcp_scratch.modelspace():
-            if e.dxftype()=="HATCH":
-                try:
-                    h=e.copy(); msp.add_entity(h); h.translate(ox,oy,0)
-                except Exception: pass
-                continue
             g=leaf_geom(e,0.5)
             if g: write_leaf(msp,g,{"layer":e.dxf.layer,"color":256},PT=lambda x,y:(x+ox,y+oy))
     # sheet-size model windows for legend / notes / schedules, in a row below
@@ -1089,18 +1061,17 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
 
     # ── paper space sheets ──────────────────────────────────────────────────
     from ezdxf.enums import MTextEntityAlignment as MA
-    SN=marco_info["sheetno"]; TT=marco_info["title"]; VTS=_style(marco_info.get("vt_style","Standard"))
+    snx,sny=marco_info["sheetno_pos"]; snh=marco_info["sheetno_h"]
+    tcx,tcy=marco_info["title_pos"]; tth=marco_info["title_h"]; ttw=marco_info["title_w"]
     def sheet(num,title,view_center,view_h,vp_center,vp_size,plan=False):
         lay=E.layouts.new(num)
         lay.page_setup(size=(PH,PW),margins=(0.126,0.126,0.126,0.126),units="inch",rotation=1)
         lay.dxf.current_style_sheet="normal-plotter.ctb"
         lay.add_blockref("x-marco",(0,0),dxfattribs={"layer":"0"})
-        m1=lay.add_mtext(num,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"char_height":SN["h"],
-                                         "width":SN["w"] or 0.94,"style":_style(SN["style"])})
-        m1.set_location(SN["insert"],attachment_point=SN["att"])
-        m2=lay.add_mtext(title,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"char_height":TT["h"],
-                                           "width":TT["w"],"style":_style(TT["style"])})
-        m2.set_location(TT["insert"],attachment_point=TT["att"])
+        m1=lay.add_mtext(num,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"char_height":snh,"width":0.94})
+        m1.set_location((snx,sny),attachment_point=MA.TOP_LEFT)
+        m2=lay.add_mtext(title,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"char_height":tth,"width":ttw})
+        m2.set_location((tcx,tcy),attachment_point=MA.TOP_CENTER)
         lay.add_viewport(center=vp_center,size=vp_size,view_center_point=view_center,view_height=view_h,
                          dxfattribs={"layer":"0-Vport","status":2})
         if plan:
@@ -1110,7 +1081,7 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
             lay.add_arc((vx,vy),0.125,180,360,dxfattribs={"layer":"G-ANNO-TTLB","color":256})
             lay.add_line((vx,vy),(vx+2.7,vy),dxfattribs={"layer":"G-ANNO-NPLT","color":256})
             for s,dx,dy in ((title,0.08,0.16),(scale_label,0.07,-0.04),("1",-0.17,0.07)):
-                mt=lay.add_mtext(s,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"char_height":0.125,"style":VTS})
+                mt=lay.add_mtext(s,dxfattribs={"layer":"G-ANNO-TTLB","color":256,"char_height":0.125})
                 mt.set_location((vx+dx,vy+dy),attachment_point=MA.TOP_LEFT if s!="1" else MA.MIDDLE_CENTER)
         return num
     made=[]
@@ -1125,12 +1096,6 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
         try:
             if junk in E.layouts: E.layouts.delete(junk)
         except: pass
-    # open on MODEL, zoomed to the four plan copies (never on an empty sheet tab)
-    try:
-        row_w=copies[-1][2][0]-copies[0][2][0]+view_w
-        E.set_modelspace_vport(height=max(bh*1.4, row_w/2.6),
-                               center=((copies[0][2][0]+copies[-1][2][0])/2, cy))
-    except Exception: pass
     return E, made, scale_label
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1209,10 +1174,6 @@ def process_files(uploaded_files):
             if rcp_scratch is None: rcp_scratch=sc
             else:
                 for e in sc.modelspace():
-                    if e.dxftype()=="HATCH":
-                        try: rcp_scratch.modelspace().add_entity(e.copy())
-                        except Exception: pass
-                        continue
                     g=leaf_geom(e,0.5)
                     if g: write_leaf(rcp_scratch.modelspace(),g,{"layer":e.dxf.layer,"color":256})
         except Exception as ex:
@@ -1222,9 +1183,8 @@ def process_files(uploaded_files):
     try:
         marco,minfo=extract_marco(plan_sheets[0])
     except Exception as ex:
-        marco,minfo=ezdxf.new("R2018"),dict(found=False,col_center=33.9,paper=(36.0,24.0),src=None,
-                                            sheetno=dict(insert=(34.38,1.12),h=0.236,w=0.94,att=1,style="Standard"),
-                                            title=dict(insert=(33.9,2.95),h=0.118,w=2.5,att=2,style="Standard"),vt_style="Standard")
+        marco,minfo=ezdxf.new("R2000"),dict(found=False,col_center=33.9,sheetno_pos=(34.38,1.12),sheetno_h=0.236,
+                                            title_pos=(33.9,2.95),title_h=0.118,title_w=2.5,paper=(36.0,24.0))
         debug.append(f"marco error: {ex}")
 
     # x-plan / x-planA,B…
@@ -1251,14 +1211,6 @@ def process_files(uploaded_files):
                     if g: write_leaf(bm,g,{"layer":e.dxf.layer,"color":256})
             except: pass
     files["x-plan.dxf"]=base
-    try:
-        X1,X2,Y1,Y2=union
-        base.set_modelspace_vport(height=(Y2-Y1)*1.3,center=((X1+X2)/2,(Y1+Y2)/2))
-    except Exception: pass
-    try:
-        pw,ph=minfo.get("paper",(36.0,24.0))
-        marco.set_modelspace_vport(height=max(pw,ph)*0.75,center=(max(pw,ph)/2,min(pw,ph)/2))
-    except Exception: pass
     files["x-marco.dxf"]=marco
     E,made,scale_label=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,fbox=fbox if len(fw)>=20 else None)
     files["E-Electrical Plan.dxf"]=E
