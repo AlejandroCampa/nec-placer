@@ -1018,8 +1018,9 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     E.header["$INSUNITS"]=ins_units or 1
     E.header["$PSLTSCALE"]=1
     # xrefs — RELATIVE paths so the folder can live anywhere
-    E.add_xref_def(filename="x-plan.dwg",name="x-plan")
-    E.add_xref_def(filename="x-marco.dwg",name="x-marco")
+    # ATTACH (flag 4), exactly like the engineer's file — not overlay
+    E.add_xref_def(filename="x-plan.dwg",name="x-plan",flags=4)
+    E.add_xref_def(filename="x-marco.dwg",name="x-marco",flags=4)
 
     PW,PH=snap_sheet(*marco_info.get("paper",(36.0,24.0)))
     u_per_in=UNIT_PER_IN.get(ins_units,1.0)
@@ -1124,6 +1125,13 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
         try:
             if junk in E.layouts: E.layouts.delete(junk)
         except: pass
+    # open on MODEL, zoomed to the four plan copies (never on an empty sheet tab)
+    E.header["$TILEMODE"]=1
+    try:
+        row_w=copies[-1][2][0]-copies[0][2][0]+view_w
+        E.set_modelspace_vport(height=max(bh*1.4, row_w/2.6),
+                               center=((copies[0][2][0]+copies[-1][2][0])/2, cy))
+    except Exception: pass
     return E, made, scale_label
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1244,6 +1252,15 @@ def process_files(uploaded_files):
                     if g: write_leaf(bm,g,{"layer":e.dxf.layer,"color":256})
             except: pass
     files["x-plan.dxf"]=base
+    for dd in (base,marco): dd.header["$TILEMODE"]=1
+    try:
+        X1,X2,Y1,Y2=union
+        base.set_modelspace_vport(height=(Y2-Y1)*1.3,center=((X1+X2)/2,(Y1+Y2)/2))
+    except Exception: pass
+    try:
+        pw,ph=minfo.get("paper",(36.0,24.0))
+        marco.set_modelspace_vport(height=max(pw,ph)*0.75,center=(max(pw,ph)/2,min(pw,ph)/2))
+    except Exception: pass
     files["x-marco.dxf"]=marco
     E,made,scale_label=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,fbox=fbox if len(fw)>=20 else None)
     files["E-Electrical Plan.dxf"]=E
