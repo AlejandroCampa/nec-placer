@@ -998,7 +998,6 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     # xrefs — RELATIVE paths so the folder can live anywhere
     E.add_xref_def(filename="x-plan.dwg",name="x-plan")
     E.add_xref_def(filename="x-marco.dwg",name="x-marco")
-    for pn in split_parts: E.add_xref_def(filename=f"x-plan{pn}.dwg",name=f"x-plan{pn}")
 
     PW,PH=snap_sheet(*marco_info.get("paper",(36.0,24.0)))
     u_per_in=UNIT_PER_IN.get(ins_units,1.0)
@@ -1197,17 +1196,21 @@ def process_files(uploaded_files):
     def plan_letter(part,i):
         mt=re.search(r"PLAN[ _-]?([A-Z])\b",part["sheet_path"].stem.upper())
         return mt.group(1) if mt else chr(65+i)
+    # Always ONE x-plan: when the architect split the building across sheets,
+    # the parts share coordinates, so they merge into the same model space.
     split=[]
-    if len(parts)==1:
-        files["x-plan.dxf"]=parts[0]["doc"]
-    else:
-        xp=ezdxf.new("R2000"); 
-        for i,pt in enumerate(parts):
-            ln=plan_letter(pt,i); split.append(ln)
-            files[f"x-plan{ln}.dxf"]=pt["doc"]
-            xp.add_xref_def(filename=f"x-plan{ln}.dwg",name=f"x-plan{ln}")
-            xp.modelspace().add_blockref(f"x-plan{ln}",(0,0))
-        files["x-plan.dxf"]=xp
+    base=parts[0]["doc"]; bm=base.modelspace()
+    for pt in parts[1:]:
+        for e in pt["doc"].modelspace():
+            try:
+                if e.dxftype()=="TEXT":
+                    bm.add_text(e.dxf.text,dxfattribs={"layer":e.dxf.layer,"color":256,"insert":(e.dxf.insert.x,e.dxf.insert.y),
+                                                       "height":e.dxf.height,"rotation":e.dxf.rotation})
+                else:
+                    g=leaf_geom(e,parts[0]["flat"])
+                    if g: write_leaf(bm,g,{"layer":e.dxf.layer,"color":256})
+            except: pass
+    files["x-plan.dxf"]=base
     files["x-marco.dxf"]=marco
     E,made,scale_label=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,fbox=fbox if len(fw)>=20 else None)
     files["E-Electrical Plan.dxf"]=E
