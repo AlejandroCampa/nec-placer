@@ -571,7 +571,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
     all_x1=min(z[0] for z in zones)-200; all_x2=max(z[1] for z in zones)+200
     all_y1=min(z[2] for z in zones)-200; all_y2=max(z[3] for z in zones)+200
 
-    out=ezdxf.new("R2000", setup=True)     # setup=True loads CENTER/DASHED linetypes
+    out=ezdxf.new("R2018", setup=True)     # setup=True loads CENTER/DASHED linetypes
     for lname,(col,lt,lw) in OUT_LAYERS.items():
         if lname not in out.layers:
             L=out.layers.new(lname)
@@ -764,7 +764,7 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
     floor_cx=(min(z[0] for z in zones)+max(z[1] for z in zones))/2
     inzone=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in zones)
 
-    scratch=ezdxf.new("R2000"); sm=scratch.modelspace()
+    scratch=ezdxf.new("R2018"); sm=scratch.modelspace()
     for ln,col in (("A-CLNG",9),("A-CLNG-PATT",9),("E-LITE-EQPM",33)):
         scratch.layers.new(ln).color=col
     from ezdxf.math import Matrix44
@@ -876,7 +876,7 @@ def extract_marco(sheet_path):
     import datetime
     from ezdxf.addons import Importer
     a=ezdxf.readfile(str(sheet_path))
-    marco=ezdxf.new("R2000",setup=True); mm=marco.modelspace()
+    marco=ezdxf.new("R2018",setup=True); mm=marco.modelspace()
     for ln,col in (("G-ANNO-TTLB",6),("G-ANNO-TTLB-WIDE",214),("E-TEXTR",3),("E-MEDIUM",7),("E-TEXTS",2),("SHT-TXT1",4)):
         if ln not in marco.layers: marco.layers.new(ln).color=col
     info=dict(found=False, col_center=33.9, right=35.5, top=23.5, paper=(36.0,24.0), border_name=None, src=a,
@@ -1001,7 +1001,7 @@ def snap_sheet(w,h):
 
 def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, split_parts, fbox=None):
     import datetime
-    E=ezdxf.new("R2000",setup=True); msp=E.modelspace()
+    E=ezdxf.new("R2018",setup=True); msp=E.modelspace()
     src=marco_info.get("src")
     if src is not None:
         try:
@@ -1126,7 +1126,6 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
             if junk in E.layouts: E.layouts.delete(junk)
         except: pass
     # open on MODEL, zoomed to the four plan copies (never on an empty sheet tab)
-    E.header["$TILEMODE"]=1
     try:
         row_w=copies[-1][2][0]-copies[0][2][0]+view_w
         E.set_modelspace_vport(height=max(bh*1.4, row_w/2.6),
@@ -1223,7 +1222,7 @@ def process_files(uploaded_files):
     try:
         marco,minfo=extract_marco(plan_sheets[0])
     except Exception as ex:
-        marco,minfo=ezdxf.new("R2000"),dict(found=False,col_center=33.9,paper=(36.0,24.0),src=None,
+        marco,minfo=ezdxf.new("R2018"),dict(found=False,col_center=33.9,paper=(36.0,24.0),src=None,
                                             sheetno=dict(insert=(34.38,1.12),h=0.236,w=0.94,att=1,style="Standard"),
                                             title=dict(insert=(33.9,2.95),h=0.118,w=2.5,att=2,style="Standard"),vt_style="Standard")
         debug.append(f"marco error: {ex}")
@@ -1252,7 +1251,6 @@ def process_files(uploaded_files):
                     if g: write_leaf(bm,g,{"layer":e.dxf.layer,"color":256})
             except: pass
     files["x-plan.dxf"]=base
-    for dd in (base,marco): dd.header["$TILEMODE"]=1
     try:
         X1,X2,Y1,Y2=union
         base.set_modelspace_vport(height=(Y2-Y1)*1.3,center=((X1+X2)/2,(Y1+Y2)/2))
