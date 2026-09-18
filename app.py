@@ -239,7 +239,7 @@ def sheet_score(name):
 def is_rcp(name):
     n = re.sub(r'[_\-]+',' ',name.lower())
     n = re.sub(r'\s+',' ',n)
-    return any(k in n for k in ["rcp","reflected","ceiling plan","a103"])
+    return any(k in n for k in ["rcp","reflect","ceiling","plafon","cielo"])
 
 CEIL_LAYER_KW=("CLNG","CEIL","LITE","LIGHT","LAMP","LUM","PLAF","CIELO",
                "LUZ","LUCES","ILUMIN")
@@ -976,7 +976,7 @@ E_LAYERS={"E-EQUIP":4,"E-EQUIP-EXIST":4,"E-HEAVY":4,"E-MEDIUM":7,"E-LIGHT":2,"E-
           "E-WIREPOLES":3,"0-Vport":4,"G-ANNO-TTLB":6,"G-ANNO-NPLT":7,"A-CLNG":9,"E-SYMB":7}
 E_LINETYPES={"E-WIRING-F":"DASHDOT","E-WIRINGF":"HIDDEN2","E-WIREPOLES":"DASHDOT2"}
 PLAN_SHEETS=[("E-101","ELECTRICAL LIGHTING PLAN"),("E-102","ELECTRICAL POWER PLAN"),
-             ("E-104","DATA/TELECOMMUNICATIONS PLAN"),("E-105","FIRE ALARM SYSTEM PLAN")]
+             ("E-103","DATA/TELECOMMUNICATIONS PLAN"),("E-104","FIRE ALARM SYSTEM PLAN")]
 NOTE_SHEETS_BEFORE=[("E-001","LEGEND AND NOTES"),("E-002","FIRE ALARM SYSTEM LEGEND AND NOTES")]
 NOTE_SHEETS_AFTER=[("E-601","ONE LINE DIAGRAM"),("E-602","PANELBOARDS SCHEDULE"),
                    ("E-603","LIGHTING FIXTURES AND EQUIPMENT SCHEDULES")]
