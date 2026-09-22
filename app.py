@@ -125,7 +125,8 @@ _NOTE_WORDS={"SEE","TYP","TYPICAL","NOTE","NOTES","REF","SIM","UNO","MIN","MAX",
     "GYP","GWB","CONC","CMU","STUD","PLYWD","PLYWOOD","SLAB","FTG","FOOTING","JOIST",
     "SHEATHING","INSUL","INSULATION","CAULK","SEALANT","FLASHING","PAINT","FINISH","VCT",
     "CARPET","GRANITE","SOFFIT","PARAPET","CURB","SLOPE","DN","UP","RO","ROUGH","OPENING",
-    "HDR","HEADER","SILL","LINTEL"}
+    "HDR","HEADER","SILL","LINTEL","NORTH","NORTE","PROPERTY","PROPIEDAD","LIMIT","LIMITE",
+    "LOT","LOTE","SETBACK","EASEMENT","SCHEDULE","LEGEND","KEY"}
 _ROOMLIKE=re.compile(r"^[A-ZÁÉÍÓÚÑ&/.\- ]+( ?[A-Z]{0,3}-?\d{1,3}[A-Z]?)?$")
 def is_grid_id(txt):
     return bool(_GRID_ID.match(txt.strip().upper()))
@@ -236,6 +237,7 @@ CEIL_BLOCK_KW=("LIGHT","LITE","LAMP","LUM","FIXT","DOWNL","RECESS","TROFFER",
                "LUZ","ILUMIN")
 RCP_TEXT_KW=("REFLECTED","CEILING PLAN","RCP","PLAFON","PLAFÓN","CIELO RASO")
 
+def _norm(s): return re.sub(r"[\s_\-\.]+","",str(s).lower())
 def quick_scan(p):
     """Cheap per-file scan. Returns (has_vp, walls, xref, ceil, total, rcp_txt)."""
     try:
@@ -348,7 +350,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
     for e in doc_a1.modelspace():
         try:
             if e.dxftype()=="INSERT" and e.dxf.name not in SKIP_BLOCKS:
-                if e.dxf.name.lower() in dxf_stems:
+                if _norm(e.dxf.name) in {_norm(s) for s in dxf_stems}:
                     xref_name=e.dxf.name
                     xref_ix=e.dxf.insert.x; xref_iy=e.dxf.insert.y
                     xref_sx=getattr(e.dxf,'xscale',1.0)
@@ -387,7 +389,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
         return ux/xref_sx, uy/xref_sy
 
     if xref_name:
-        master_path=next((p for p in dxf_paths if p.stem.lower()==xref_name.lower()),None)
+        master_path=next((p for p in dxf_paths if _norm(p.stem)==_norm(xref_name)),None)
         doc_m=ezdxf.readfile(str(master_path)) if master_path else doc_a1
     else:
         master_path=None
@@ -397,7 +399,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
 
     msp_m=doc_m.modelspace()
 
-    zones=[]
+    zones=[]; zone_src=[]
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
         for e in layout:
@@ -417,42 +419,8 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
                         half_w=half_h*aspect
                         if half_w<50 or half_h<50: continue
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
+                        zone_src.append(layout.name)
             except: pass
-
-    if xref_name and zones:
-        lot_x1=min(z[0] for z in zones); lot_x2=max(z[1] for z in zones)
-        covered_y1=min(z[2] for z in zones); covered_y2=max(z[3] for z in zones)
-        wall_ys=[]
-        for e in msp_m:
-            try:
-                if e.dxftype()=="LINE" and getattr(e.dxf,'layer','') in \
-                   ["AP-WALL","AR-WALLS","A-WALL","WALL"]:
-                    cx=(e.dxf.start.x+e.dxf.end.x)/2
-                    cy=(e.dxf.start.y+e.dxf.end.y)/2
-                    if lot_x1<=cx<=lot_x2 and cy<0 and \
-                       not (covered_y1<=cy<=covered_y2):
-                        wall_ys.append(cy)
-            except: pass
-        if wall_ys:
-            bands={}
-            for y in wall_ys:
-                b=round(y/500)*500; bands[b]=bands.get(b,0)+1
-            sb=sorted(bands.keys())
-            clusters,cur=[],([sb[0]] if sb else [])
-            for i in range(1,len(sb)):
-                if sb[i]-sb[i-1]<=1000: cur.append(sb[i])
-                else: clusters.append(cur); cur=[sb[i]]
-            if cur: clusters.append(cur)
-            valid=[c for c in clusters
-                   if sum(bands.get(b,0) for b in c)>=20 and sum(c)/len(c)<0]
-            if valid:
-                best=max(valid,key=lambda c:sum(c)/len(c))
-                y1=min(best)-1500; y2=max(best)+1500
-                cy=(y1+y2)/2
-                if not any(Z1<=cy<=Z2 for _,_,Z1,Z2 in zones):
-                    vp_x1=min(z[0] for z in zones)
-                    vp_x2=max(z[1] for z in zones)
-                    zones.append((vp_x1,vp_x2,y1,y2))
 
     # ── Zone refinement: hone in on the building(s), not the whole sheet ────
     # 1. wall midpoints (any WALL/MURO/PARED layer, top level + 2 block levels)
@@ -508,16 +476,39 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
 
     n_before=len([z for z in zones if z[0]>-1e8 and z[1]<1e8])
     cand=[z for z in zones if z[0]>-1e8 and z[1]<1e8]
-    scored=[(z,sum(1 for p in wall_pts if _inside(z,p))) for z in cand]
-    scored=[(z,n) for z,n in scored if n>=15]                 # drop elevations/sections/details
+    # label positions in plan coordinates (the sheet's own text, xref-transformed)
+    lab_pts=[]
+    for e in doc_a1.modelspace():
+        try:
+            if e.dxftype() in ("TEXT","MTEXT"):
+                t=(e.dxf.text if e.dxftype()=="TEXT" else clean_mtext(e.text)).strip()
+                if len(t)<2: continue
+                p=(e.dxf.insert.x,e.dxf.insert.y)
+                lab_pts.append(a1_to_master(*p) if xref_name else p)
+        except: pass
+    scored=[(z,sum(1 for p in wall_pts if _inside(z,p)),sum(1 for p in lab_pts if _inside(z,p))) for z in cand]
+    max_n=max([n for _,n,_ in scored] or [0])
+    # a floor plan: a real share of the walls AND room labels on it
+    # (elevations/sections/roof plans have few walls and no labels)
+    scored=[(z,n,m) for z,n,m in scored if n>=max(15,0.2*max_n) and (m>=3 or len(lab_pts)<3)]
     keep=[]
-    for z,n in scored:                                        # drop site/overall views
-        container=any(z2 is not z and _contains(z,z2) and n2>=0.6*n for z2,n2 in scored)
+    for z,n,m in scored:                                       # drop site/overall views
+        container=any(z2 is not z and _contains(z,z2) and n2>=0.6*n for z2,n2,_ in scored)
         if not container: keep.append((z,n))
     dedup=[]
-    for z,n in sorted(keep,key=lambda t:_area(t[0])):         # near-duplicates → keep tighter
-        if not any(_contains(z2,z) and _area(z)>0.8*_area(z2) for z2,_ in dedup): dedup.append((z,n))
-    zones=[z for z,_ in dedup]
+    for z,n in sorted(keep,key=lambda t:-_area(t[0])):         # largest first
+        nested=any(_contains(z2,z) and n2>=2*n for z2,n2 in dedup)   # enlarged detail of a kept floor
+        dup=any(_contains(z2,z) and _area(z)>0.8*_area(z2) for z2,_ in dedup)
+        if not nested and not dup: dedup.append((z,n))
+    # two views of the SAME floor (architect split the plan) overlap → merge them
+    merged=[]
+    for z,n in dedup:
+        for i,(z2,n2) in enumerate(merged):
+            ix=max(0,min(z[1],z2[1])-max(z[0],z2[0])); iy=max(0,min(z[3],z2[3])-max(z[2],z2[2]))
+            if ix*iy>0.2*min(_area(z),_area(z2)):
+                merged[i]=((min(z[0],z2[0]),max(z[1],z2[1]),min(z[2],z2[2]),max(z[3],z2[3])),n+n2); break
+        else: merged.append((z,n))
+    zones=[z for z,_ in merged]
     if not zones and wall_pts:
         zones=_cluster_walls(wall_pts)
     if not zones:
@@ -537,6 +528,16 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
                 z=(b[0]-px,b[1]+px,b[2]-py,b[3]+py)
         tight.append(z)
     zones=tight
+    vp_zones=[z for z in cand]   # viewport zones in original order (names in zone_src)
+    def _ov(a,b):
+        ix=max(0,min(a[1],b[1])-max(a[0],b[0])); iy=max(0,min(a[3],b[3])-max(a[2],b[2])); return ix*iy
+    zone_names=[]
+    for z in zones:
+        best=None; bo=0
+        for zv,nm in zip(vp_zones,zone_src):
+            o=_ov(z,zv)
+            if o>bo: bo=o; best=nm
+        zone_names.append(best if (best and not re.match(r"(?i)^layout\s*\d*$",best)) else "")
     zone_note=f"{len(zones)} floor zone(s), {len(wall_pts)} wall segs"
     zone_wbox=[]
     for z in zones:
@@ -655,8 +656,8 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
                         placed_labels+=1
             except: pass
     else:
-        # Xref: try A-1 transform first (works with ODA), then Master text fallback
-        tl=[]
+        # Xref: the sheet's labels transform onto the plan exactly; place each one
+        # inside the floor it lands in. No averaging, no offset.
         for e in doc_a1.modelspace():
             try:
                 if e.dxftype() in ["TEXT","MTEXT"]:
@@ -669,55 +670,20 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
                     if len(txt)<1: continue
                     src_lay=getattr(e.dxf,'layer','')
                     kind=label_kind(txt,src_lay)
-                    if kind in ("grid","gridid"): lay_out="S-GRID-IDEN"
-                    elif kind=="room": lay_out="A-ANNO-TEXT"
+                    if kind in ("grid","gridid"): lay_out,zs="S-GRID-IDEN",ezones
+                    elif kind=="room": lay_out,zs="A-AREA-IDEN",zones
                     else: continue
                     mx,my=a1_to_master(ix,iy)
-                    txt_rot=txt_rot-math.degrees(xref_rot)
-                    if my<1000:
-                        tl.append((mx,my,txt,h*xref_sx,txt_rot,lay_out))
+                    if not inzone(mx,my,zs): continue
+                    if kind=="gridid" and inzone(mx,my,zones): continue    # ids live in the ring
+                    if lay_out=="A-AREA-IDEN": txt="%%U"+txt
+                    out_msp.add_text(txt[:50],dxfattribs={
+                        "layer":lay_out,"color":256,"insert":(mx,my),
+                        "height":h*xref_sx,"rotation":txt_rot-math.degrees(xref_rot)})
+                    placed_labels+=1
             except: pass
-        # Fallback: read directly from Master, find nearest X cluster to zone
-        if not tl:
-            raw=[]
-            for e in msp_m:
-                try:
-                    if e.dxftype() in ["TEXT","MTEXT"]:
-                        if e.dxftype()=="TEXT":
-                            txt=e.dxf.text.strip(); ix,iy=e.dxf.insert.x,e.dxf.insert.y
-                            h=e.dxf.height; txt_rot=getattr(e.dxf,'rotation',0.0)
-                        else:
-                            txt=clean_mtext(e.text); ix,iy=e.dxf.insert.x,e.dxf.insert.y
-                            h=getattr(e.dxf,'char_height',20); txt_rot=getattr(e.dxf,'rotation',0.0)
-                        if len(txt)<2: continue
-                        raw.append((ix,iy,txt,h,txt_rot))
-                except: pass
-            if raw:
-                xs=sorted(set(round(ix/500)*500 for ix,iy,t,h,r in raw))
-                best_x=min(xs,key=lambda x:abs(x-zone_x_center))
-                cluster=[item for item in raw if abs(item[0]-best_x)<=2000]
-                if cluster:
-                    cx=sum(ix for ix,iy,t,h,r in cluster)/len(cluster)
-                    xc=zone_x_center-cx
-                    for ix,iy,txt,h,txt_rot in cluster:
-                        tl.append((ix+xc,iy,txt,h,txt_rot))
-        # Per-zone X correction: compute avg_x from labels in each zone Y range
-        # then shift that avg to zone center — works for both ground floor and basement
-        for (X1,X2,Y1,Y2) in zones:
-            zone_cx=(X1+X2)/2
-            zone_buf=max(300.0,0.2*(Y2-Y1))
-            zone_lbls=[it for it in tl if (Y1-zone_buf)<=it[1]<=(Y2+zone_buf)]
-            if not zone_lbls: continue
-            avg_mx=sum(it[0] for it in zone_lbls)/len(zone_lbls)
-            xc=zone_cx-avg_mx
-            for mx,my,txt,h,txt_rot,lay in zone_lbls:
-                if lay=="A-ANNO-TEXT": lay="A-AREA-IDEN"; txt="%%U"+txt
-                out_msp.add_text(txt[:50],dxfattribs={
-                    "layer":lay,"color":256,
-                    "insert":(mx+xc,my),"height":h,"rotation":txt_rot})
-                placed_labels+=1
 
-    return dict(doc=out, zones=zones, ents=ec[0]+copied, labels=placed_labels,
+    return dict(doc=out, zones=zones, zone_names=zone_names, ents=ec[0]+copied, labels=placed_labels,
                 zone_note=zone_note, ins_units=ins_units, debug=debug_info,
                 master_path=master_path, xref_name=xref_name, sheet_path=sheet_path,
                 wall_pts=wall_pts, flat=flat, plan_w=plan_w)
@@ -763,7 +729,7 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
         try:
             if e.dxftype()=="INSERT" and e.dxf.name not in SKIP_BLOCKS:
                 nm=e.dxf.name.lower()
-                if nm in dxf_stems and nm!=rcp_path.stem.lower():
+                if _norm(nm) in {_norm(s) for s in dxf_stems} and _norm(nm)!=_norm(rcp_path.stem):
                     rx=(nm,e.dxf.insert.x,e.dxf.insert.y,getattr(e.dxf,'xscale',1.0),
                         getattr(e.dxf,'yscale',1.0),math.radians(getattr(e.dxf,'rotation',0.0))); break
         except: pass
@@ -773,7 +739,7 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
         cr=math.cos(-rot_); sr=math.sin(-rot_)
         return (dx*cr-dy*sr)/sx_,(dx*sr+dy*cr)/sy_
     if rx:
-        p_src=next((p for p in dxf_paths if p.stem.lower()==rx[0]),None)
+        p_src=next((p for p in dxf_paths if _norm(p.stem)==_norm(rx[0])),None)
         if p_src: src_doc=ezdxf.readfile(str(p_src)); src_msp=src_doc.modelspace(); src_name=p_src.name
     rcp_zones=[]
     for layout in doc_rcp.layouts:
@@ -975,7 +941,7 @@ def snap_sheet(w,h):
     if w<h: w,h=h,w
     return min(STD_SHEETS,key=lambda s:abs(s[0]-w)+abs(s[1]-h))
 
-def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, split_parts, fbox=None):
+def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, split_parts, fbox=None, floors=None):
     import datetime
     E=ezdxf.new("R2000",setup=True); msp=E.modelspace()
     for ln,col in E_LAYERS.items():
@@ -991,22 +957,27 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     PW,PH=snap_sheet(*marco_info.get("paper",(36.0,24.0)))
     u_per_in=UNIT_PER_IN.get(ins_units,1.0)
     X1,X2,Y1,Y2=union_zone
-    # frame the BUILDING (wall extents + 6% margin); the zone union is only a fallback
-    b=fbox if fbox else union_zone
-    bw=(b[1]-b[0])*1.06; bh=(b[3]-b[2])*1.06; cx=(b[0]+b[1])/2; cy=(b[2]+b[3])/2
-    # plan viewport (engineer's numbers) and scale
+    # floors: (name, box) — each framed on its own building extents
+    if not floors: floors=[("",fbox if fbox else union_zone)]
+    boxes=[b for _,b in floors]
+    bw=max((b[1]-b[0]) for b in boxes)*1.06; bh=max((b[3]-b[2]) for b in boxes)*1.06
+    cx=(X1+X2)/2; cy=(Y1+Y2)/2
+    # plan viewport (engineer's numbers) and ONE scale for the whole set
     VPc=(16.46,12.81); VPw,VPh=31.77,21.28
     need=max(bw/(VPw*u_per_in),bh/(VPh*u_per_in))
     F,scale_label=pick_scale(need,ins_units)
     if ins_units not in UNIT_PER_IN: scale_label+=" (VERIFY UNITS)"
     view_w=VPw*F*u_per_in
-    # one x-plan copy per plan sheet, in a row, 1.2× the viewport window apart
+    # one x-plan copy per discipline, in a row; one sheet per discipline per floor
     spacing=view_w*1.2
-    copies=[]
+    copies=[]; n=0
     for k,(num,title) in enumerate(PLAN_SHEETS):
         ox=k*spacing; oy=0.0
         msp.add_blockref("x-plan",(ox,oy))
-        copies.append((num,title,(cx+ox,cy+oy)))
+        for fname,b in floors:
+            n+=1
+            t=f"{title} - {fname}" if fname else title
+            copies.append((f"E-1{n:02d}",t,((b[0]+b[1])/2+ox,(b[2]+b[3])/2+oy)))
     # RCP content sits on the LIGHTING copy (copy 0), like the engineer's
     if rcp_scratch is not None:
         ox,oy=0.0,0.0
@@ -1201,7 +1172,26 @@ def process_files(uploaded_files):
             except: pass
     files["x-plan.dxf"]=base
     files["x-marco.dxf"]=marco
-    E,made,scale_label=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,fbox=fbox if len(fw)>=20 else None)
+    # floors: every zone across parts; overlapping zones (split halves) are one floor
+    named=[(z,nm) for pt in parts for z,nm in zip(pt["zones"],pt.get("zone_names",[""]*len(pt["zones"])))]
+    floor_zones=[]   # [(zone, [names])]
+    for z,nm in named:
+        for i,(z2,nms) in enumerate(floor_zones):
+            ix=max(0,min(z[1],z2[1])-max(z[0],z2[0])); iy=max(0,min(z[3],z2[3])-max(z[2],z2[2]))
+            a1=(z[1]-z[0])*(z[3]-z[2]); a2=(z2[1]-z2[0])*(z2[3]-z2[2])
+            if ix*iy>0.2*min(a1,a2):
+                floor_zones[i]=((min(z[0],z2[0]),max(z[1],z2[1]),min(z[2],z2[2]),max(z[3],z2[3])),nms+([nm] if nm else [])); break
+        else: floor_zones.append((z,[nm] if nm else []))
+    def _nat(s): return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)"," ".join(s[1]))]
+    floor_zones.sort(key=_nat)
+    floors=[]
+    for i,(z,nms) in enumerate(floor_zones):
+        pts=[p for p in fw if z[0]<=p[0]<=z[1] and z[2]<=p[1]<=z[3]]
+        b=(min(p[0] for p in pts),max(p[0] for p in pts),min(p[1] for p in pts),max(p[1] for p in pts)) if len(pts)>=20 else z
+        name="" if len(floor_zones)==1 else (f"PLAN {'/'.join(dict.fromkeys(nms))}" if nms else f"LEVEL {i+1}")
+        floors.append((name,b))
+    E,made,scale_label=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,
+                                        fbox=fbox if len(fw)>=20 else None, floors=floors)
     files["E-Electrical Plan.dxf"]=E
 
     # write, convert, zip
@@ -1215,7 +1205,7 @@ def process_files(uploaded_files):
         for p in sorted(outdir.iterdir()): z.write(p,p.name)
     shutil.rmtree(tmp,ignore_errors=True)
 
-    msg=(f"Done. {len(parts)} plan part(s) → {', '.join(k for k in files)}; "
+    msg=(f"Done. {len(parts)} plan part(s), {len(floors)} floor(s) → {', '.join(k for k in files)}; "
          f"{sum(pt['ents'] for pt in parts)} entities, {sum(pt['labels'] for pt in parts)} labels; "
          f"sheets {', '.join(made)} at {scale_label}")
     msg+=f"; marco {'extracted from '+plan_sheets[0].name if minfo.get('found') else 'NOT found (generic frame)'}"
