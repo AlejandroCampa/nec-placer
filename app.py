@@ -15,22 +15,11 @@ st.markdown("""
     .stDeployButton {display:none;}
     section[data-testid="stSidebar"] {display:none;}
     .block-container {padding: 0 !important; max-width: 100% !important;}
+    .credit {position: fixed; right: 18px; bottom: 12px; font-size: 12px;
+             opacity: 0.55; z-index: 1000; pointer-events: none;}
 </style>
+<div class="credit">Alejandro M. C.</div>
 """, unsafe_allow_html=True)
-
-if not st.session_state.get("authenticated"):
-    st.markdown("<br><br><br>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1,1,1])
-    with col2:
-        st.markdown("### NEC Placer")
-        pw = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
-        if st.button("Continue", use_container_width=True):
-            if pw == os.environ.get("password", "necplacer2025"):
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect password")
-    st.stop()
 
 def dwg_to_dxf(dwg_path: Path) -> Path:
     try:
