@@ -126,7 +126,8 @@ _NOTE_WORDS={"SEE","TYP","TYPICAL","NOTE","NOTES","REF","SIM","UNO","MIN","MAX",
     "SHEATHING","INSUL","INSULATION","CAULK","SEALANT","FLASHING","PAINT","FINISH","VCT",
     "CARPET","GRANITE","SOFFIT","PARAPET","CURB","SLOPE","DN","UP","RO","ROUGH","OPENING",
     "HDR","HEADER","SILL","LINTEL","NORTH","NORTE","PROPERTY","PROPIEDAD","LIMIT","LIMITE",
-    "LOT","LOTE","SETBACK","EASEMENT","SCHEDULE","LEGEND","KEY"}
+    "LOT","LOTE","SETBACK","EASEMENT","SCHEDULE","LEGEND","KEY","GYPSUM","FASCIA","ABOVE","BELOW",
+    "TRANSLUCENT","SLIDING","TEMPERED","OVERHEAD","BEYOND","EXISTING","EXIST","DEMO","DEMOLISH"}
 _ROOMLIKE=re.compile(r"^[A-ZÁÉÍÓÚÑ&/.\- ]+( ?[A-Z]{0,3}-?\d{1,3}[A-Z]?)?$")
 def is_grid_id(txt):
     return bool(_GRID_ID.match(txt.strip().upper()))
@@ -973,7 +974,7 @@ def extract_marco(sheet_path):
     alive=[e for e in mm if e.dxftype() in ("TEXT","MTEXT")]
     for e in alive:
         s=txt_of(e).upper()
-        if "NOTE" in s and is_label(s):
+        if "NOTE" in s.replace(" ","") and is_label(s):
             x,y=pos_of(e)
             if not any(o is not e and not is_label(txt_of(o)) and math.hypot(pos_of(o)[0]-x,pos_of(o)[1]-y)<1.6 for o in alive):
                 mm.delete_entity(e)
@@ -1155,6 +1156,70 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     return E, made, scale_label
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PREVIEWS — PNG renders so nothing has to be opened in AutoCAD to check it
+# ═══════════════════════════════════════════════════════════════════════════
+def render_views(doc, views, size=(15,10), dpi=110, black=True):
+    """views: [(name, (x1,x2,y1,y2) | None)] → {name: png bytes}. One draw, many crops."""
+    import io as _io
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from ezdxf.addons.drawing import RenderContext, Frontend
+    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+    from ezdxf.addons.drawing.config import Configuration, BackgroundPolicy, ColorPolicy
+    fig=plt.figure(figsize=size,dpi=dpi); ax=fig.add_axes([0,0,1,1]); ax.set_axis_off()
+    ctx=RenderContext(doc); ctx.set_current_layout(doc.modelspace())
+    cfg=Configuration(background_policy=BackgroundPolicy.WHITE,min_lineweight=0.12,
+                      color_policy=ColorPolicy.BLACK if black else ColorPolicy.COLOR)
+    Frontend(ctx,MatplotlibBackend(ax),config=cfg).draw_layout(doc.modelspace(),finalize=True)
+    out={}
+    for name,box in views:
+        if box:
+            pad_x=0.03*(box[1]-box[0]); pad_y=0.03*(box[3]-box[2])
+            x1,x2,y1,y2=box[0]-pad_x,box[1]+pad_x,box[2]-pad_y,box[3]+pad_y
+        else:
+            ax.autoscale(); x1,x2=ax.get_xlim(); y1,y2=ax.get_ylim()
+        w=max(x2-x1,1e-9); h=max(y2-y1,1e-9)
+        fig.set_size_inches(size[0],max(3.0,min(size[1]*1.6,size[0]*h/w)))   # figure shaped like the view
+        ax.set_xlim(x1,x2); ax.set_ylim(y1,y2); ax.set_aspect("equal",adjustable="box")
+        buf=_io.BytesIO(); fig.savefig(buf,format="png",dpi=dpi,facecolor="white"); out[name]=buf.getvalue()
+    plt.close(fig)
+    return out
+
+def build_previews(outdir, floors, rcp_scratch, has_rcp):
+    """Floor plans (labels), lighting copy with the RCP, and the E-101 sheet with its frame."""
+    previews=[]
+    try:
+        plan=ezdxf.readfile(str(outdir/"x-plan.dxf"))
+        views=[(f"Plan — {n}" if n else "Plan",b) for n,b in floors] if floors else [("Plan",None)]
+        for k,v in render_views(plan,views).items(): previews.append((k,v))
+        if has_rcp and rcp_scratch is not None:
+            for e in rcp_scratch.modelspace():
+                g=leaf_geom(e,0.5)
+                if g: write_leaf(plan.modelspace(),g,{"layer":e.dxf.layer,"color":256})
+            if "A-CLNG" not in plan.layers: plan.layers.new("A-CLNG").color=9
+            if "E-LITE-EQPM" not in plan.layers: plan.layers.new("E-LITE-EQPM").color=33
+            for k,v in render_views(plan,[(f"Lighting + RCP — {n}" if n else "Lighting + RCP",b) for n,b in floors],black=False).items(): previews.append((k,v))
+    except Exception as ex:
+        previews.append(("Plan (render failed)",None)); print("preview:",ex)
+    try:
+        from ezdxf.addons import Importer
+        marco=ezdxf.readfile(str(outdir/"x-marco.dxf")); E=ezdxf.readfile(str(outdir/"E-Electrical Plan.dxf"))
+        lay=next((l for l in E.layouts if l.name.startswith("E-1")),None)
+        sh=ezdxf.new("R2018",setup=True); sm=sh.modelspace()
+        imp=Importer(marco,sh); imp.import_entities(list(marco.modelspace()),sm); imp.finalize()
+        if lay is not None:
+            imp2=Importer(E,sh); imp2.import_entities([e for e in lay if e.dxftype()!="VIEWPORT"],sm); imp2.finalize()
+            for v in lay:
+                if v.dxftype()=="VIEWPORT" and v.dxf.id!=1:
+                    cx,cy,w,h=v.dxf.center.x,v.dxf.center.y,v.dxf.width,v.dxf.height
+                    sm.add_lwpolyline([(cx-w/2,cy-h/2),(cx+w/2,cy-h/2),(cx+w/2,cy+h/2),(cx-w/2,cy+h/2)],close=True,dxfattribs={"color":4})
+                    sm.add_text("VIEWPORT → plan goes here",dxfattribs={"insert":(cx-2.5,cy),"height":0.5,"color":4})
+        for k,v in render_views(sh,[(f"Sheet {lay.name if lay else ''} — frame + fields",None)],size=(15,10),black=False).items(): previews.append((k,v))
+    except Exception as ex:
+        previews.append(("Sheet (render failed)",None)); print("preview:",ex)
+    return previews
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ORCHESTRATOR
 # ═══════════════════════════════════════════════════════════════════════════
 def process_files(uploaded_files):
@@ -1295,6 +1360,8 @@ def process_files(uploaded_files):
         p=outdir/name; doc.saveas(str(p))
         d=dxf_to_dwg(p)
         (dwg_ok if d else dwg_fail).append(name)
+    try: previews=build_previews(outdir,floors,rcp_scratch,rcp_scratch is not None)
+    except Exception: previews=[]
     buf=io.BytesIO()
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as z:
         for p in sorted(outdir.iterdir()): z.write(p,p.name)
@@ -1307,7 +1374,7 @@ def process_files(uploaded_files):
     if rcp_diag: msg+="; RCP "+" | ".join(rcp_diag)
     if dwg_fail: msg+=f"; DWG conversion failed for {', '.join(dwg_fail)} (DXF included)"
     if debug: msg+=" | "+" | ".join(debug)
-    return buf.getvalue(), msg+".", None
+    return (buf.getvalue(),previews), msg+".", None
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -1319,9 +1386,15 @@ st.markdown("<h4 style='text-align:center; padding: 20px 0 10px;'>NEC Placer</h4
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
 if st.session_state.result:
+    zip_bytes,previews=st.session_state.result
     with st.chat_message("assistant"):
+        shown=[(k,v) for k,v in previews if v]
+        if shown:
+            tabs=st.tabs([k for k,_ in shown])
+            for tab,(k,v) in zip(tabs,shown):
+                with tab: st.image(v,use_container_width=True)
         st.download_button("Download project (x-plan, x-marco, E-Electrical Plan)",
-            data=st.session_state.result,file_name="nec-project.zip",
+            data=zip_bytes,file_name="nec-project.zip",
             mime="application/zip",type="primary",use_container_width=True)
 uploaded=st.file_uploader("Upload files",type=["dxf","dwg"],accept_multiple_files=True,label_visibility="collapsed")
 if uploaded:
