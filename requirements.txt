@@ -1,3 +1,4 @@
 streamlit
 ezdxf
 requests
+matplotlib
