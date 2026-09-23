@@ -1158,9 +1158,24 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
 # ═══════════════════════════════════════════════════════════════════════════
 # PREVIEWS — PNG renders so nothing has to be opened in AutoCAD to check it
 # ═══════════════════════════════════════════════════════════════════════════
+_FONTS_READY=[False]
+def _ensure_fonts():
+    """python:*-slim ships no fonts, so ezdxf would silently skip all text.
+    Feed it the TrueType fonts bundled inside matplotlib instead."""
+    if _FONTS_READY[0]: return
+    try:
+        import matplotlib
+        from ezdxf.fonts import fonts as _f
+        mpl_fonts=os.path.join(os.path.dirname(matplotlib.__file__),"mpl-data","fonts","ttf")
+        if not _f.font_manager.has_font("DejaVuSans.ttf"):
+            _f.font_manager.build([mpl_fonts])
+    except Exception: pass
+    _FONTS_READY[0]=True
+
 def render_views(doc, views, size=(15,10), dpi=110, black=True):
     """views: [(name, (x1,x2,y1,y2) | None)] → {name: png bytes}. One draw, many crops."""
     import io as _io
+    _ensure_fonts()
     import matplotlib; matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from ezdxf.addons.drawing import RenderContext, Frontend
