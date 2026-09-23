@@ -1172,33 +1172,61 @@ def _ensure_fonts():
     except Exception: pass
     _FONTS_READY[0]=True
 
-def render_views(doc, views, size=(15,10), dpi=110, black=True):
-    """views: [(name, (x1,x2,y1,y2) | None)] → {name: png bytes}. One draw, many crops."""
-    import io as _io
+def render_svgs(doc, views, black=True):
+    """views: [(name, (x1,x2,y1,y2) | None)] → {name: svg string}. Vector output:
+    crisp at any zoom, text as glyph outlines. Each view only draws what it shows."""
     _ensure_fonts()
-    import matplotlib; matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from ezdxf.addons.drawing import RenderContext, Frontend
-    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+    from ezdxf.addons.drawing import Frontend, RenderContext, layout as dl
+    from ezdxf.addons.drawing.svg import SVGBackend
     from ezdxf.addons.drawing.config import Configuration, BackgroundPolicy, ColorPolicy
-    fig=plt.figure(figsize=size,dpi=dpi); ax=fig.add_axes([0,0,1,1]); ax.set_axis_off()
-    ctx=RenderContext(doc); ctx.set_current_layout(doc.modelspace())
-    cfg=Configuration(background_policy=BackgroundPolicy.WHITE,min_lineweight=0.12,
+    cfg=Configuration(background_policy=BackgroundPolicy.WHITE,min_lineweight=0.1,
                       color_policy=ColorPolicy.BLACK if black else ColorPolicy.COLOR)
-    Frontend(ctx,MatplotlibBackend(ax),config=cfg).draw_layout(doc.modelspace(),finalize=True)
-    out={}
+    msp=doc.modelspace(); out={}
     for name,box in views:
         if box:
-            pad_x=0.03*(box[1]-box[0]); pad_y=0.03*(box[3]-box[2])
-            x1,x2,y1,y2=box[0]-pad_x,box[1]+pad_x,box[2]-pad_y,box[3]+pad_y
-        else:
-            ax.autoscale(); x1,x2=ax.get_xlim(); y1,y2=ax.get_ylim()
-        w=max(x2-x1,1e-9); h=max(y2-y1,1e-9)
-        fig.set_size_inches(size[0],max(3.0,min(size[1]*1.6,size[0]*h/w)))   # figure shaped like the view
-        ax.set_xlim(x1,x2); ax.set_ylim(y1,y2); ax.set_aspect("equal",adjustable="box")
-        buf=_io.BytesIO(); fig.savefig(buf,format="png",dpi=dpi,facecolor="white"); out[name]=buf.getvalue()
-    plt.close(fig)
+            px=0.03*(box[1]-box[0]); py=0.03*(box[3]-box[2])
+            X1,X2,Y1,Y2=box[0]-px,box[1]+px,box[2]-py,box[3]+py
+            def keep(e,X1=X1,X2=X2,Y1=Y1,Y2=Y2):
+                try:
+                    t=e.dxftype()
+                    if t in ("TEXT","MTEXT","INSERT"):
+                        p=e.dxf.insert; return X1<=p.x<=X2 and Y1<=p.y<=Y2
+                    g=leaf_geom(e,1.0)
+                    if g is None: return True
+                    b=geom_bbox(g); return b[0]<=X2 and b[1]>=X1 and b[2]<=Y2 and b[3]>=Y1
+                except Exception: return True
+        else: keep=None
+        ctx=RenderContext(doc); ctx.set_current_layout(msp)
+        be=SVGBackend()
+        Frontend(ctx,be,config=cfg).draw_layout(msp,finalize=True,filter_func=keep)
+        svg=be.get_string(dl.Page(0,0),settings=dl.Settings(fit_page=True))
+        out[name]=svg
     return out
+
+_VIEWER_HTML='''<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;height:100%;background:#fff;overflow:hidden;font-family:sans-serif}
+#wrap{position:absolute;inset:0;cursor:grab}#wrap:active{cursor:grabbing}
+#wrap svg{width:100%;height:100%;display:block}
+#hint{position:absolute;right:10px;top:8px;font-size:12px;color:#888;background:#fff;padding:2px 6px;border-radius:4px;pointer-events:none}
+</style></head><body><div id="wrap">__SVG__</div><div id="hint">scroll = zoom · drag = pan · double-click = reset</div>
+<script>
+const wrap=document.getElementById('wrap'),svg=wrap.querySelector('svg');
+svg.removeAttribute('width');svg.removeAttribute('height');svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+const orig=svg.getAttribute('viewBox').trim().split(/[ ,]+/).map(Number);let vb=orig.slice();
+const apply=()=>svg.setAttribute('viewBox',vb.join(' '));
+wrap.addEventListener('wheel',e=>{e.preventDefault();const r=svg.getBoundingClientRect();
+ const sx=Math.max(r.width/orig[2],r.height/orig[3]);const cw=orig[2]*sx,ch=orig[3]*sx; // rendered content box (meet)
+ const ox=r.left+(r.width-cw)/2,oy=r.top+(r.height-ch)/2;
+ const fx=(e.clientX-ox)/cw,fy=(e.clientY-oy)/ch;const k=e.deltaY<0?0.8:1.25;
+ const mx=vb[0]+fx*vb[2],my=vb[1]+fy*vb[3];vb[2]*=k;vb[3]*=k;vb[0]=mx-fx*vb[2];vb[1]=my-fy*vb[3];apply();},{passive:false});
+let drag=null;
+wrap.addEventListener('mousedown',e=>{drag=[e.clientX,e.clientY,vb[0],vb[1]];e.preventDefault();});
+window.addEventListener('mousemove',e=>{if(!drag)return;const r=svg.getBoundingClientRect();
+ const sx=Math.min(r.width/vb[2],r.height/vb[3]);vb[0]=drag[2]-(e.clientX-drag[0])/sx;vb[1]=drag[3]-(e.clientY-drag[1])/sx;apply();});
+window.addEventListener('mouseup',()=>drag=null);
+wrap.addEventListener('dblclick',()=>{vb=orig.slice();apply();});
+</script></body></html>'''
+def viewer_html(svg): return _VIEWER_HTML.replace("__SVG__",svg)
 
 def build_previews(outdir, floors, rcp_scratch, has_rcp):
     """Floor plans (labels), lighting copy with the RCP, and the E-101 sheet with its frame."""
@@ -1206,14 +1234,14 @@ def build_previews(outdir, floors, rcp_scratch, has_rcp):
     try:
         plan=ezdxf.readfile(str(outdir/"x-plan.dxf"))
         views=[(f"Plan — {n}" if n else "Plan",b) for n,b in floors] if floors else [("Plan",None)]
-        for k,v in render_views(plan,views).items(): previews.append((k,v))
+        for k,v in render_svgs(plan,views).items(): previews.append((k,v))
         if has_rcp and rcp_scratch is not None:
             for e in rcp_scratch.modelspace():
                 g=leaf_geom(e,0.5)
                 if g: write_leaf(plan.modelspace(),g,{"layer":e.dxf.layer,"color":256})
             if "A-CLNG" not in plan.layers: plan.layers.new("A-CLNG").color=9
             if "E-LITE-EQPM" not in plan.layers: plan.layers.new("E-LITE-EQPM").color=33
-            for k,v in render_views(plan,[(f"Lighting + RCP — {n}" if n else "Lighting + RCP",b) for n,b in floors],black=False).items(): previews.append((k,v))
+            for k,v in render_svgs(plan,[(f"Lighting + RCP — {n}" if n else "Lighting + RCP",b) for n,b in floors],black=False).items(): previews.append((k,v))
     except Exception as ex:
         previews.append(("Plan (render failed)",None)); print("preview:",ex)
     try:
@@ -1229,7 +1257,7 @@ def build_previews(outdir, floors, rcp_scratch, has_rcp):
                     cx,cy,w,h=v.dxf.center.x,v.dxf.center.y,v.dxf.width,v.dxf.height
                     sm.add_lwpolyline([(cx-w/2,cy-h/2),(cx+w/2,cy-h/2),(cx+w/2,cy+h/2),(cx-w/2,cy+h/2)],close=True,dxfattribs={"color":4})
                     sm.add_text("VIEWPORT → plan goes here",dxfattribs={"insert":(cx-2.5,cy),"height":0.5,"color":4})
-        for k,v in render_views(sh,[(f"Sheet {lay.name if lay else ''} — frame + fields",None)],size=(15,10),black=False).items(): previews.append((k,v))
+        for k,v in render_svgs(sh,[(f"Sheet {lay.name if lay else ''} — frame + fields",None)],black=False).items(): previews.append((k,v))
     except Exception as ex:
         previews.append(("Sheet (render failed)",None)); print("preview:",ex)
     return previews
@@ -1405,9 +1433,10 @@ if st.session_state.result:
     with st.chat_message("assistant"):
         shown=[(k,v) for k,v in previews if v]
         if shown:
+            import streamlit.components.v1 as components
             tabs=st.tabs([k for k,_ in shown])
             for tab,(k,v) in zip(tabs,shown):
-                with tab: st.image(v,use_container_width=True)
+                with tab: components.html(viewer_html(v),height=760)
         st.download_button("Download project (x-plan, x-marco, E-Electrical Plan)",
             data=zip_bytes,file_name="nec-project.zip",
             mime="application/zip",type="primary",use_container_width=True)
