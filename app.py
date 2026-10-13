@@ -201,7 +201,7 @@ def write_leaf(out_msp,g,attrs,PT=None,reflect=False):
         if reflect: sa,ea=ea,sa
         out_msp.add_arc(center=c,radius=g[2],start_angle=sa,end_angle=ea,dxfattribs=attrs)
 
-def iter_leaves(ents, doc, max_depth, ceil_fn=None, skip=()):
+def iter_leaves(ents, doc, max_depth, ceil_fn=None, skip=(), keep_insert=None):
     """Yield (leaf_entity, in_ceil) walking INSERTs with ezdxf's own resolver,
     so base points, mirrored inserts, non-uniform scale and OCS are all right."""
     def rec(es, d, in_ceil):
@@ -210,6 +210,8 @@ def iter_leaves(ents, doc, max_depth, ceil_fn=None, skip=()):
                 lay=getattr(e.dxf,'layer','0')
                 if lay in skip: continue
                 if e.dxftype()=="INSERT":
+                    if keep_insert and keep_insert(e):
+                        yield e,in_ceil; continue          # keep as a block (a fixture), don't explode
                     if d>=max_depth or e.dxf.name not in doc.blocks: continue
                     nxt=in_ceil or (ceil_fn(lay) if ceil_fn else False)
                     try: sub=e.virtual_entities()
@@ -747,7 +749,7 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
     inzone=lambda x,y: any(X1<=x<=X2 and Y1<=y<=Y2 for X1,X2,Y1,Y2 in zones)
 
     scratch=ezdxf.new("R2000"); sm=scratch.modelspace()
-    for ln,col in (("A-CLNG",9),("E-LITE-EQPM",33)):
+    for ln,col in (("A-CLNG",9),("E-LITE-EQPM",33),("E-LITE-EQPM-IDEN",33)):
         scratch.layers.new(ln).color=col
     doc_rcp=ezdxf.readfile(str(rcp_path)); msp_rcp=doc_rcp.modelspace()
     src_doc,src_msp,src_name=doc_rcp,msp_rcp,"self"
@@ -806,11 +808,37 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
     def T(x,y):
         x2=x+tx; y2=y+ty
         return ((2*floor_cx-x2) if use_mirror else x2), y2
-    n=0
-    for ve,in_ceil in iter_leaves(src_msp,src_doc,5,ceil_fn=is_ceiling_layer,skip=set(SKIP)):
+    n=0; nfix=0
+    from ezdxf.addons import Importer
+    _imp=Importer(src_doc,scratch); _imported=set()
+    FIXKW=("LITE","LIGHT","LAMP","LUM","FIXT","INL","LUZ","ILUMIN")
+    def is_fixture_insert(e):
+        try:
+            u=(getattr(e.dxf,'layer','')+" "+e.dxf.name).upper()
+            if not any(k in u for k in FIXKW): return False
+            blk=src_doc.blocks.get(e.dxf.name)
+            return blk is not None and sum(1 for x in blk)<=400
+        except Exception: return False
+    def fixture_type(name):
+        # "INL-1 - INL-1-5338199-REFLECTING CEILING PLAN A" → "INL-1"; "Light-2a" → "Light-2a"
+        t=name.split(" - ")[0].strip(); return re.sub(r"[-_ ]?\d{6,}.*$","",t)[:12] or name[:12]
+    for ve,in_ceil in iter_leaves(src_msp,src_doc,5,ceil_fn=is_ceiling_layer,skip=set(SKIP),keep_insert=is_fixture_insert):
         if n>60000: break
         try:
             lay=getattr(ve.dxf,'layer','0')
+            if ve.dxftype()=="INSERT":
+                p=ve.dxf.insert; m=(p.x,p.y)
+                if not (_insrc(*m) and inzone(*T(*m))): continue
+                nm=ve.dxf.name
+                if nm not in _imported:
+                    try: _imp.import_block(nm); _imp.finalize(); _imported.add(nm)
+                    except Exception: continue
+                rot=getattr(ve.dxf,'rotation',0.0); sx=getattr(ve.dxf,'xscale',1.0); sy=getattr(ve.dxf,'yscale',1.0)
+                if use_mirror: rot=-rot; sx=-sx
+                ins=sm.add_blockref(nm,T(*m),dxfattribs={"layer":"E-LITE-EQPM","color":256,"rotation":rot,"xscale":sx,"yscale":sy})
+                sm.add_text(fixture_type(nm),dxfattribs={"layer":"E-LITE-EQPM-IDEN","color":256,"height":6.0,
+                            "insert":(T(*m)[0]+12.0,T(*m)[1]+12.0)})
+                nfix+=1; continue
             if lay in RCP_GRID: continue
             if not in_ceil and not is_ceiling_layer(lay): continue
             g=leaf_geom(ve,flat)
@@ -823,7 +851,7 @@ def extract_rcp(rcp_path, dxf_paths, dxf_stems, zones, floor_keys, fbox, flat):
         except: pass
     diag=(f"{rcp_path.name} [src={src_name}, vp={len(rcp_zones)}, pts={len(_all)}, walls={len(_wpts)}, "
           f"shift=({tx:.0f},{ty:.0f}), align={score_align}/mirror={score_mirror} → "
-          f"{'mirrored' if use_mirror else 'aligned'}, added={n}]")
+          f"{'mirrored' if use_mirror else 'aligned'}, added={n} + {nfix} fixture blocks]")
     return scratch, diag
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1001,7 +1029,7 @@ def extract_marco(sheet_path):
 E_LAYERS={"E-EQUIP":4,"E-EQUIP-EXIST":4,"E-HEAVY":4,"E-MEDIUM":7,"E-LIGHT":2,"E-XLIGHT":1,
           "E-LITE-EQPM":33,"E-LITE-EQPM-IDEN":33,"E-SWITCH":4,"E-TEXTL":6,"E-TEXTM":4,
           "E-TEXTR":3,"E-TEXTS":2,"E-DIM":2,"E-Wiring":4,"E-WIRING-F":4,"E-WIRINGF":4,
-          "E-WIREPOLES":3,"0-Vport":4,"G-ANNO-TTLB":6,"G-ANNO-NPLT":7,"A-CLNG":9,"E-SYMB":7}
+          "E-WIREPOLES":3,"0-Vport":4,"G-ANNO-TTLB":6,"G-ANNO-NPLT":7,"A-CLNG":9,"E-SYMB":7,"E-LITE-EQPM-IDEN":33}
 E_LINETYPES={"E-WIRING-F":"DASHDOT","E-WIRINGF":"HIDDEN2","E-WIREPOLES":"DASHDOT2"}
 PLAN_SHEETS=[("E-101","ELECTRICAL LIGHTING PLAN"),("E-102","ELECTRICAL POWER PLAN"),
              ("E-103","DATA/TELECOMMUNICATIONS PLAN"),("E-104","FIRE ALARM SYSTEM PLAN")]
@@ -1066,7 +1094,17 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
     # RCP content sits on the LIGHTING copy (copy 0), like the engineer's
     if rcp_scratch is not None:
         ox,oy=0.0,0.0
+        from ezdxf.addons import Importer
+        blocks=[e for e in rcp_scratch.modelspace() if e.dxftype() in ("INSERT","TEXT")]
+        if blocks:
+            try:
+                _i=Importer(rcp_scratch,E); _i.import_entities(blocks,msp); _i.finalize()
+                for e in list(msp)[-len(blocks):]:
+                    try: e.translate(ox,oy,0)
+                    except Exception: pass
+            except Exception: pass
         for e in rcp_scratch.modelspace():
+            if e.dxftype() in ("INSERT","TEXT"): continue
             g=leaf_geom(e,0.5)
             if g: write_leaf(msp,g,{"layer":e.dxf.layer,"color":256},PT=lambda x,y:(x+ox,y+oy))
     # sheet-size model windows for legend / notes / schedules, in a row below
@@ -1153,7 +1191,189 @@ def build_electrical(union_zone, rcp_scratch, marco_info, ins_units, project, sp
         try:
             if junk in E.layouts: E.layouts.delete(junk)
         except: pass
-    return E, made, scale_label
+    return E, made, scale_label, F
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LIGHTING DESIGN — switches, switching letters, conduit runs (engineer's symbols)
+# ═══════════════════════════════════════════════════════════════════════════
+import json as _json
+CCA_SYMBOLS=_json.loads('''{"Switch":{"base":[0.0,0.0],"ents":[["A",[0.0842,0.0002],0.027,90.0,0.0],["A",[0.1382,0.0002],0.027,270.0,180.0],["L",[0.0572,0.0002],[0.016,0.0002]]],"bbox":[0.016,0.165,-0.027,0.027]},"Switch-3W":{"base":[0.0,0.0],"ents":[["A",[0.0842,0.0002],0.027,90.0,0.0],["A",[0.1382,0.0002],0.027,270.0,180.0],["L",[0.0572,0.0002],[0.016,0.0002]],["L",[0.1915,-0.026],[0.1652,0.0003]],["L",[0.2178,0.0003],[0.1915,0.0266]],["L",[0.1915,-0.026],[0.2178,0.0003]],["L",[0.1652,0.0003],[0.1915,0.0266]]],"bbox":[0.016,0.218,-0.027,0.027]},"Occpncy-Sensor":{"base":[0.0,0.0],"ents":[["C",[0.0,0.0],0.0891],["T","OS",[-0.0811,-0.0396],0.075,0]],"bbox":[-0.089,0.089,-0.089,0.089]},"WIRE":{"base":[0.0,0.0],"ents":[["L",[0.0467,0.1067],[0.1001,0.0695]],["L",[-0.0467,0.0533],[-0.0467,-0.0533]],["L",[0.0467,0.1067],[0.0467,-0.1067]],["L",[0.0,0.1067],[0.0,-0.1067]]],"bbox":[-0.047,0.1,-0.107,0.107]},"AHEAD":{"base":[0.0,0.0],"ents":[["S",[[0.0,0.0377],[0.0,-0.0377],[0.1819,0.0],[0.1819,0.0]]],["L",[0.1819,0.0],[0.0,-0.0377]],["L",[0.0,0.0377],[0.1819,0.0]],["L",[0.0,0.0377],[0.0,-0.0377]]],"bbox":[0.0,0.182,-0.038,0.038]},"Cndt-s":{"base":[0.0,0.0],"ents":[["A",[-0.0327,-0.0296],0.0442,42.14,137.86],["A",[0.0327,0.0296],0.0442,222.14,317.86]],"bbox":[-0.077,0.077,-0.074,0.074]},"Tap":{"base":[0.0,0.0],"ents":[["P",[[-0.0169,0.0,1.0],[0.0169,0.0,1.0]],true]],"bbox":[-0.017,0.017,0.0,0.0]},"Light-1a":{"base":[0.0,0.0],"ents":[["C",[0.0,0.0],0.088]],"bbox":[-0.088,0.088,-0.088,0.088]},"Rcpt":{"base":[0.0,0.0],"ents":[["L",[0.0264,0.0045],[0.253,0.0045]],["L",[0.0264,0.0519],[0.253,0.0519]],["C",[0.1867,0.0282],0.0704]],"bbox":[0.026,0.257,-0.042,0.099]},"Rcpt-gf":{"base":[0.0,0.0],"ents":[["L",[0.025,0.0038],[0.025,0.0511]],["S",[[0.025,0.0511],[0.025,0.0038],[0.2516,0.0511],[0.2516,0.0038]]],["S",[[0.2516,0.0038],[0.2493,0.0285],[0.2557,0.0278],[0.2557,0.0278]]],["L",[0.025,0.0038],[0.2516,0.0038]],["L",[0.025,0.0511],[0.2516,0.0511]],["S",[[0.2516,0.0511],[0.2491,0.0266],[0.2557,0.0278],[0.2557,0.0278]]],["C",[0.1854,0.0275],0.0704]],"bbox":[0.025,0.256,-0.043,0.098]},"DATA":{"base":[0.0,0.0],"ents":[["L",[0.118,0.0707],[0.0,0.0]],["L",[0.118,-0.0707],[0.118,0.0707]],["L",[0.0,0.0],[0.118,-0.0707]],["L",[0.0,0.0],[0.118,0.0]],["S",[[0.0,0.0],[0.118,-0.0707],[0.118,0.0],[0.118,0.0]]]],"bbox":[0.0,0.118,-0.071,0.071]}}''')     # firm symbol library, paper inches, insert at sheet scale factor
+
+def ensure_cca_block(doc,name):
+    """Create one of the firm's symbol blocks in doc from the embedded library."""
+    if name in doc.blocks: return
+    spec=CCA_SYMBOLS.get(name)
+    if not spec: return
+    b=doc.blocks.new(name,base_point=(spec["base"][0],spec["base"][1],0))
+    for en in spec["ents"]:
+        k=en[0]
+        try:
+            if k=="L": b.add_line(tuple(en[1]),tuple(en[2]))
+            elif k=="C": b.add_circle(tuple(en[1]),en[2])
+            elif k=="A": b.add_arc(tuple(en[1]),en[2],en[3],en[4])
+            elif k=="P": b.add_lwpolyline([(p[0],p[1],0,0,p[2]) for p in en[1]],format="xyseb",close=en[2])
+            elif k=="S": b.add_solid([tuple(p) for p in en[1]])
+            elif k=="T": b.add_text(en[1],dxfattribs={"insert":tuple(en[2]),"height":en[3],"rotation":en[4]})
+        except Exception: pass
+
+def lighting_pass(E, plan_doc, rcp_scratch, S, u):
+    """Design the lighting plan on the LIGHTING copy (offset 0,0):
+       rooms from the architect's labels (wall-crossing aware), one switching
+       group per fixture type per room, switches at the door latch side,
+       lowercase switching letters, curved conduit runs switch→fixtures.
+       S = model units per paper inch (symbol size), u = model units per real inch."""
+    import math as _m
+    msp=E.modelspace(); pm=plan_doc.modelspace()
+    for ln,col in (("E-SWITCH",4),("E-Wiring",4),("E-LITE-EQPM-IDEN",33)):
+        if ln not in E.layers: E.layers.new(ln).color=col
+    # ── walls (with a grid index) ──
+    walls=[]
+    for e in pm:
+        try:
+            lay=e.dxf.layer.upper()
+            if not any(k in lay for k in ("WALL","MURO","PARED","GLAZ","CURT")): continue
+            if e.dxftype()=="LINE": walls.append((e.dxf.start.x,e.dxf.start.y,e.dxf.end.x,e.dxf.end.y))
+            elif e.dxftype()=="LWPOLYLINE":
+                pts=[(p[0],p[1]) for p in e.get_points()]
+                for a,b in zip(pts,pts[1:]): walls.append((a[0],a[1],b[0],b[1]))
+        except Exception: pass
+    # closed door leaves count as walls for the room test (an open doorway is a gap in the wall lines)
+    door_arcs=[]
+    for e in pm:
+        try:
+            if e.dxftype()=="ARC" and ("DOOR" in e.dxf.layer.upper() or "PUERTA" in e.dxf.layer.upper()):
+                r=e.dxf.radius; sw=(e.dxf.end_angle-e.dxf.start_angle)%360
+                if 22*u<=r<=60*u and 60<=sw<=120: door_arcs.append(e)
+        except Exception: pass
+    cell=120.0*u; grid={}
+    def _cells(x1,y1,x2,y2):
+        for cx in range(int(min(x1,x2)//cell),int(max(x1,x2)//cell)+1):
+            for cy in range(int(min(y1,y2)//cell),int(max(y1,y2)//cell)+1): yield (cx,cy)
+    nwall=len(walls)
+    for e in door_arcs:   # both leaf positions, so the opening is closed whichever way the arc was drawn
+        C=e.dxf.center; r=e.dxf.radius
+        for a in (e.dxf.start_angle,e.dxf.end_angle):
+            walls.append((C.x,C.y,C.x+r*_m.cos(_m.radians(a)),C.y+r*_m.sin(_m.radians(a))))
+    for i,w in enumerate(walls):
+        for k in _cells(*w): grid.setdefault(k,[]).append(i)
+    def _ccw(a,b,c): return (c[1]-a[1])*(b[0]-a[0])>(b[1]-a[1])*(c[0]-a[0])
+    def _inter(p,q,w):
+        a=(w[0],w[1]); b=(w[2],w[3])
+        return _ccw(p,a,b)!=_ccw(q,a,b) and _ccw(p,q,a)!=_ccw(p,q,b)
+    def crossings(p,q):
+        seen=set(); n=0
+        for k in _cells(p[0],p[1],q[0],q[1]):
+            for i in grid.get(k,()):
+                if i in seen: continue
+                seen.add(i)
+                if _inter(p,q,walls[i]): n+=1
+        return n
+    def dist_to_walls(p):
+        best=1e18
+        for k in _cells(p[0]-cell,p[1]-cell,p[0]+cell,p[1]+cell):
+            for i in grid.get(k,()):
+                if i>=nwall: continue
+                x1,y1,x2,y2=walls[i]; dx,dy=x2-x1,y2-y1; L2=dx*dx+dy*dy or 1e-9
+                t=max(0,min(1,((p[0]-x1)*dx+(p[1]-y1)*dy)/L2)); px,py=x1+t*dx,y1+t*dy
+                best=min(best,_m.hypot(p[0]-px,p[1]-py))
+        return best
+    # ── rooms (labels) ──
+    rooms=[]
+    for e in pm:
+        if e.dxftype()=="TEXT" and e.dxf.layer=="A-AREA-IDEN":
+            rooms.append((e.dxf.text.replace("%%U","").strip(),(e.dxf.insert.x,e.dxf.insert.y)))
+    R=600.0*u
+    def room_of(p):
+        cand=sorted(((_m.hypot(p[0]-c[0],p[1]-c[1]),i) for i,(n,c) in enumerate(rooms)),key=lambda t:t[0])[:6]
+        best=None
+        for d,i in cand:
+            if d>R: break
+            x=crossings(p,rooms[i][1])
+            key=(x,d)
+            if best is None or key<best[0]: best=(key,i)
+            if x==0: break
+        return best[1] if best and best[0][0]<=2 else None
+    # ── fixtures ──
+    fx=[]
+    for e in rcp_scratch.modelspace():
+        if e.dxftype()=="INSERT" and e.dxf.layer=="E-LITE-EQPM":
+            t=e.dxf.name.split(" - ")[0].strip(); t=re.sub(r"[-_ ]?\d{6,}.*$","",t)[:12]
+            fx.append(dict(p=(e.dxf.insert.x,e.dxf.insert.y),type=t))
+    for f in fx: f["room"]=room_of(f["p"])
+    # ── doors → switch spots ──
+    doors=[]
+    for e in door_arcs:
+        try:
+            r=e.dxf.radius; sw=(e.dxf.end_angle-e.dxf.start_angle)%360
+            C=(e.dxf.center.x,e.dxf.center.y)
+            P1=(C[0]+r*_m.cos(_m.radians(e.dxf.start_angle)),C[1]+r*_m.sin(_m.radians(e.dxf.start_angle)))
+            P2=(C[0]+r*_m.cos(_m.radians(e.dxf.end_angle)),C[1]+r*_m.sin(_m.radians(e.dxf.end_angle)))
+            mid=_m.radians((e.dxf.start_angle+sw/2)); M=(C[0]+r*_m.cos(mid),C[1]+r*_m.sin(mid))
+            rm_=room_of(M)
+            if rm_ is None: continue
+            Pc,Po=(P1,P2) if dist_to_walls(P1)<=dist_to_walls(P2) else (P2,P1)   # closed leaf lies on the wall
+            u1=((Pc[0]-C[0])/r,(Pc[1]-C[1])/r); u2=((Po[0]-C[0])/r,(Po[1]-C[1])/r)
+            wall_pt=(C[0]+(r+8*u)*u1[0],C[1]+(r+8*u)*u1[1])          # strike side, 8" past the jamb
+            doors.append(dict(room=rm_,wall=wall_pt,u1=u1,u2=u2,r=r))
+        except Exception: pass
+    # ── groups & placement ──
+    by_room={}
+    for i,f in enumerate(fx):
+        if f["room"] is None: continue
+        by_room.setdefault(f["room"],{}).setdefault(f["type"],[]).append(i)
+    MAXLEG=10
+    def snake(idx):
+        """Order fixtures row by row, alternating direction, then cut into legs."""
+        if len(idx)<=1: return [idx]
+        ys=sorted(fx[i]["p"][1] for i in idx)
+        gaps=sorted(b-a for a,b in zip(ys,ys[1:]) if b-a>6*u)
+        band=(gaps[len(gaps)//2]*0.6) if gaps else 48*u
+        rows={}
+        for i in idx: rows.setdefault(round(fx[i]["p"][1]/max(band,1e-9)),[]).append(i)
+        ordered=[]
+        for r_,(k,row) in enumerate(sorted(rows.items(),key=lambda t:-t[0])):
+            row.sort(key=lambda i:fx[i]["p"][0],reverse=(r_%2==1)); ordered+=row
+        return [ordered[k:k+MAXLEG] for k in range(0,len(ordered),MAXLEG)]
+    for rm_ in list(by_room):
+        legs={}
+        for typ,idx in sorted(by_room[rm_].items(),key=lambda kv:-len(kv[1])):
+            for n_,leg in enumerate(snake(idx)): legs[f"{typ}#{n_}"]=leg
+        by_room[rm_]=legs
+    letters="abcdefghijklmnopqrstuvwxyz"
+    nsw=0; nrun=0
+    for ensure in ("Switch","Switch-3W"): ensure_cca_block(E,ensure)
+    for rm_,groups in by_room.items():
+        rd=[d for d in doors if d["room"]==rm_]
+        order=sorted(groups.items(),key=lambda kv:-len(kv[1]))
+        for gi,(typ,idx) in enumerate(order):
+            L=letters[gi%26]
+            for i in idx:
+                p=fx[i]["p"]
+                msp.add_text(L,dxfattribs={"layer":"E-LITE-EQPM-IDEN","color":256,"height":0.0625*S,
+                                           "insert":(p[0]+0.12*S,p[1]-0.18*S)})
+        if not rd: continue
+        rd=sorted(rd,key=lambda d:-d["r"])[:3]
+        blk="Switch" if len(rd)==1 else "Switch-3W"
+        for di,d in enumerate(rd):
+            ang=_m.degrees(_m.atan2(d["u2"][1],d["u2"][0]))
+            for gi,(typ,idx) in enumerate(order):
+                sp=(d["wall"][0]+gi*0.2*S*d["u1"][0],d["wall"][1]+gi*0.2*S*d["u1"][1])
+                msp.add_blockref(blk,sp,dxfattribs={"layer":"E-SWITCH","color":256,"rotation":ang,"xscale":S,"yscale":S})
+                msp.add_text(letters[gi%26],dxfattribs={"layer":"E-SWITCH","color":256,"height":0.05*S,
+                             "insert":(sp[0]+0.19*S*d["u2"][0]+0.04*S*d["u1"][0],sp[1]+0.19*S*d["u2"][1]+0.04*S*d["u1"][1])})
+                nsw+=1
+                if di==0:   # conduit run: switch → nearest end of the leg, then along the leg in row order
+                    start=(sp[0]+0.1*S*d["u2"][0],sp[1]+0.1*S*d["u2"][1])
+                    seq=list(idx)
+                    if _m.hypot(fx[seq[-1]]["p"][0]-start[0],fx[seq[-1]]["p"][1]-start[1])<_m.hypot(fx[seq[0]]["p"][0]-start[0],fx[seq[0]]["p"][1]-start[1]): seq.reverse()
+                    cur=start
+                    for j in seq:
+                        q=fx[j]["p"]
+                        msp.add_lwpolyline([(cur[0],cur[1],0,0,0.25),(q[0],q[1],0,0,0)],format="xyseb",
+                                           dxfattribs={"layer":"E-Wiring","color":256})
+                        nrun+=1; cur=q
+    unassigned=sum(1 for f in fx if f["room"] is None)
+    return dict(fixtures=len(fx),rooms=len(by_room),switches=nsw,runs=nrun,unassigned=unassigned,doors=len(doors))
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PREVIEWS — PNG renders so nothing has to be opened in AutoCAD to check it
@@ -1236,12 +1456,28 @@ def build_previews(outdir, floors, rcp_scratch, has_rcp):
         views=[(f"Plan — {n}" if n else "Plan",b) for n,b in floors] if floors else [("Plan",None)]
         for k,v in render_svgs(plan,views).items(): previews.append((k,v))
         if has_rcp and rcp_scratch is not None:
+            from ezdxf.addons import Importer
+            blocks=[e for e in rcp_scratch.modelspace() if e.dxftype() in ("INSERT","TEXT")]
+            if blocks:
+                try: _i=Importer(rcp_scratch,plan); _i.import_entities(blocks,plan.modelspace()); _i.finalize()
+                except Exception: pass
             for e in rcp_scratch.modelspace():
+                if e.dxftype() in ("INSERT","TEXT"): continue
                 g=leaf_geom(e,0.5)
                 if g: write_leaf(plan.modelspace(),g,{"layer":e.dxf.layer,"color":256})
             if "A-CLNG" not in plan.layers: plan.layers.new("A-CLNG").color=9
             if "E-LITE-EQPM" not in plan.layers: plan.layers.new("E-LITE-EQPM").color=33
             for k,v in render_svgs(plan,[(f"Lighting + RCP — {n}" if n else "Lighting + RCP",b) for n,b in floors],black=False).items(): previews.append((k,v))
+            # lighting design: switches, letters, conduit runs from E-Electrical's lighting copy (offset 0,0)
+            try:
+                Ed=ezdxf.readfile(str(outdir/"E-Electrical Plan.dxf"))
+                des=[e for e in Ed.modelspace() if e.dxf.layer in ("E-SWITCH","E-Wiring") or (e.dxftype()=="TEXT" and e.dxf.layer=="E-LITE-EQPM-IDEN" and len(e.dxf.text)==1)]
+                if des:
+                    _d=Importer(Ed,plan); _d.import_entities(des,plan.modelspace()); _d.finalize()
+                    for ln,col in (("E-SWITCH",4),("E-Wiring",4)):
+                        if ln in plan.layers: plan.layers.get(ln).color=col
+                    for k,v in render_svgs(plan,[(f"Lighting design — {n}" if n else "Lighting design",b) for n,b in floors],black=False).items(): previews.append((k,v))
+            except Exception as ex: print("lighting preview:",ex)
     except Exception as ex:
         previews.append(("Plan (render failed)",None)); print("preview:",ex)
     try:
@@ -1393,8 +1629,12 @@ def process_files(uploaded_files):
         b=(min(p[0] for p in pts),max(p[0] for p in pts),min(p[1] for p in pts),max(p[1] for p in pts)) if len(pts)>=20 else z
         name="" if len(floor_zones)==1 else (f"PLAN {'/'.join(dict.fromkeys(nms))}" if nms else f"LEVEL {i+1}")
         floors.append((name,b))
-    E,made,scale_label=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,
+    E,made,scale_label,F=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,
                                         fbox=fbox if len(fw)>=20 else None, floors=floors)
+    lighting=None
+    if rcp_scratch is not None:
+        try: lighting=lighting_pass(E,base,rcp_scratch,F*UNIT_PER_IN.get(ins_units,1.0),UNIT_PER_IN.get(ins_units,1.0))
+        except Exception as ex: debug.append(f"lighting error: {ex}")
     files["E-Electrical Plan.dxf"]=E
 
     # write, convert, zip
@@ -1415,6 +1655,7 @@ def process_files(uploaded_files):
          f"sheets {', '.join(made)} at {scale_label}")
     msg+=f"; marco {'extracted from '+plan_sheets[0].name if minfo.get('found') else 'NOT found (generic frame)'}"
     if rcp_diag: msg+="; RCP "+" | ".join(rcp_diag)
+    if lighting: msg+=f"; LIGHTING {lighting['fixtures']} fixtures in {lighting['rooms']} rooms ({lighting['unassigned']} unassigned), {lighting['doors']} doors, {lighting['switches']} switches, {lighting['runs']} runs"
     if dwg_fail: msg+=f"; DWG conversion failed for {', '.join(dwg_fail)} (DXF included)"
     if debug: msg+=" | "+" | ".join(debug)
     return (buf.getvalue(),previews), msg+".", None
