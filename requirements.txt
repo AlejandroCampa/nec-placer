@@ -2,3 +2,5 @@ streamlit
 ezdxf
 requests
 matplotlib
+pdfplumber
+Pillow
