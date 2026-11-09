@@ -229,6 +229,14 @@ def sheet_score(name):
     if any(k in n for k in ["site","rcp","roof","ceiling","reflected"]): return 0
     return 1
 
+_NON_FLOOR_LAYOUT_KW={"ROOF","ELEV","ELEVATION","ELEVATIONS","SECT","SECTION","SECTIONS",
+    "AREA","SITE","RCP","REFLECT","REFLECTED","CEILING","DETAIL","DETAILS","SCHEDULE",
+    "SCHEDULES","LEGEND","NOTES","TITLE","COVER","INDEX","DEMO","DEMOLITION","ST","GEN",
+    "STRUCT","STRUCTURAL","ELECTRICAL","PLUMBING","MECH","MECHANICAL","LANDSCAPE","IRRIGATION"}
+def _is_non_floor_layout(name):
+    toks=re.split(r"[^A-Za-z0-9]+", name.upper())
+    return any(t in _NON_FLOOR_LAYOUT_KW for t in toks if t)
+
 def is_rcp(name):
     n = re.sub(r'[_\-]+',' ',name.lower())
     n = re.sub(r'\s+',' ',n)
@@ -402,7 +410,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
 
     msp_m=doc_m.modelspace()
 
-    zones=[]; zone_src=[]
+    zones=[]; zone_src=[]; all_vp_centers=[]
     for layout in doc_a1.layouts:
         if layout.name=="Model": continue
         for e in layout:
@@ -421,6 +429,8 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
                         aspect=(ps_w/ps_h) if (ps_w and ps_h and ps_h>0) else 1.5
                         half_w=half_h*aspect
                         if half_w<50 or half_h<50: continue
+                        all_vp_centers.append((mx,my))
+                        if _is_non_floor_layout(layout.name): continue
                         zones.append((mx-half_w,mx+half_w,my-half_h,my+half_h))
                         zone_src.append(layout.name)
             except: pass
@@ -452,7 +462,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
     def _contains(a,b):
         tx=0.02*(a[1]-a[0]); ty=0.02*(a[3]-a[2])
         return a[0]-tx<=b[0] and b[1]<=a[1]+tx and a[2]-ty<=b[2] and b[3]<=a[3]+ty
-    def _cluster_walls(pts):
+    def _cluster_walls(pts, cap=6):
         bx=_bb(pts); ext=max(bx[1]-bx[0],bx[3]-bx[2],1.0); cell=ext/60.0
         bins={}
         for p in pts:
@@ -471,11 +481,34 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
         comps.sort(key=len,reverse=True)
         if not comps: return []
         top=len(comps[0]); out=[]
-        for comp in comps[:6]:
+        # cap is how many NAMED floor-plan layouts survived the layout-name filter
+        # (viewport center/geometry mismatch means we can't correlate clusters to
+        # specific layouts, but a real floor has far more wall segments than a
+        # roof outline or site boundary, so density rank is the next best signal)
+        for comp in comps[:max(1,cap)]:
             if len(comp)<0.25*top: break
             b=_bb(comp); px=0.10*(b[1]-b[0]); py=0.10*(b[3]-b[2])
             out.append((b[0]-px,b[1]+px,b[2]-py,b[3]+py))
         return out
+
+    # ── Coordinate-shift correction ──────────────────────────────────────────
+    # Some converted DXFs carry a leftover origin offset: paper-space viewport
+    # centers no longer line up with where modelspace geometry actually sits,
+    # even though the drawing itself is internally consistent (every viewport
+    # is off by the SAME vector). Detect this by checking whether any named
+    # floor viewport contains a real share of the walls; if none do, solve for
+    # the single shift that maps the viewport centroid onto the wall centroid
+    # (using every viewport, not just named survivors, for a stable estimate)
+    # and re-anchor the named zones there before scoring.
+    def _inside_q(z,p): return z[0]<=p[0]<=z[1] and z[2]<=p[1]<=z[3]
+    direct_ok = any(sum(1 for p in wall_pts if _inside_q(z,p))>=15 for z in zones)
+    if not direct_ok and wall_pts and all_vp_centers and zones:
+        wgx=sum(p[0] for p in wall_pts)/len(wall_pts); wgy=sum(p[1] for p in wall_pts)/len(wall_pts)
+        vgx=sum(p[0] for p in all_vp_centers)/len(all_vp_centers); vgy=sum(p[1] for p in all_vp_centers)/len(all_vp_centers)
+        sx,sy=wgx-vgx,wgy-vgy
+        shifted=[(z[0]+sx,z[1]+sx,z[2]+sy,z[3]+sy) for z in zones]
+        if any(sum(1 for p in wall_pts if _inside_q(z,p))>=15 for z in shifted):
+            zones=shifted   # confirmed: use the corrected positions from here on
 
     n_before=len([z for z in zones if z[0]>-1e8 and z[1]<1e8])
     cand=[z for z in zones if z[0]>-1e8 and z[1]<1e8]
@@ -513,7 +546,7 @@ def extract_plan(sheet_path, dxf_paths, dxf_stems):
         else: merged.append((z,n))
     zones=[z for z,_ in merged]
     if not zones and wall_pts:
-        zones=_cluster_walls(wall_pts)
+        zones=_cluster_walls(wall_pts, cap=len(cand) if cand else 6)
     if not zones:
         zones=[(-1e9,1e9,-1e9,1e9)]
     # Tighten only when this is NOT the simple known-good case: i.e. we had to
@@ -918,31 +951,52 @@ def extract_marco(sheet_path):
             ext=ins_extent(e)
             if ext and (bext is None or (ext[1]-ext[0])*(ext[3]-ext[2])>(bext[1]-bext[0])*(bext[3]-bext[2])):
                 border,bext=e,ext
-    if border is None: return marco, info
+    loose_paper=None   # set when the frame is loose paper-space entities, not a block
+    if border is None:
+        # No reusable title-block: some architects draw the frame as raw LINE/
+        # LWPOLYLINE/TEXT directly on the sheet. Use those entities themselves.
+        xs=[];ys=[]
+        for e in best:
+            if e.dxftype()=="VIEWPORT": continue
+            try:
+                g=leaf_geom(e,0.05)
+                if g: b=geom_bbox(g); xs+=[b[0],b[1]]; ys+=[b[2],b[3]]
+                elif e.dxftype() in ("TEXT","MTEXT"):
+                    p=e.dxf.insert; xs+=[p.x]; ys+=[p.y]
+            except: pass
+        if not xs: return marco, info
+        bext=(min(xs),max(xs),min(ys),max(ys))
+        loose_paper=[e for e in best if e.dxftype()!="VIEWPORT"]
     info["found"]=True
     vx1=bvp.dxf.center.x-bvp.dxf.width/2; vx2=bvp.dxf.center.x+bvp.dxf.width/2
     vy1=bvp.dxf.center.y-bvp.dxf.height/2; vy2=bvp.dxf.center.y+bvp.dxf.height/2
     right=max(bext[1],vx2); top=max(bext[3],vy2); info["right"]=right; info["top"]=top
     logo=None
-    try:
-        for x in a.blocks[border.dxf.name]:
-            if x.dxftype()=="IMAGE":
-                p=x.dxf.insert; logo=(p.x+border.dxf.insert.x,p.y+border.dxf.insert.y); break
-    except: pass
-    # bring everything across WITH styles, then explode the border
     imp=Importer(a,marco)
-    imp.import_block(border.dxf.name)
-    ins=mm.add_blockref(border.dxf.name,(border.dxf.insert.x,border.dxf.insert.y),
-                        dxfattribs={"xscale":border.dxf.xscale,"yscale":border.dxf.yscale,"rotation":border.dxf.rotation})
-    for at in (border.attribs or []):
-        try: ins.add_attrib(at.dxf.tag or "*",at.dxf.text,at.dxf.insert,dxfattribs={"height":at.dxf.height,"rotation":at.dxf.rotation,"style":at.dxf.style,"layer":at.dxf.layer})
-        except Exception: pass
-    loose=[e for e in best if e.dxftype() in ("MTEXT","TEXT")]
-    imp.import_entities(loose,mm); imp.finalize()
+    if loose_paper is not None:
+        # no block to explode: the layout's own entities ARE the frame
+        imp.import_entities(loose_paper,mm); imp.finalize()
+        for e in list(mm):
+            if e.dxftype() in ("IMAGE","WIPEOUT","ATTDEF"): mm.delete_entity(e)
+    else:
+        try:
+            for x in a.blocks[border.dxf.name]:
+                if x.dxftype()=="IMAGE":
+                    p=x.dxf.insert; logo=(p.x+border.dxf.insert.x,p.y+border.dxf.insert.y); break
+        except: pass
+        # bring everything across WITH styles, then explode the border
+        imp.import_block(border.dxf.name)
+        ins=mm.add_blockref(border.dxf.name,(border.dxf.insert.x,border.dxf.insert.y),
+                            dxfattribs={"xscale":border.dxf.xscale,"yscale":border.dxf.yscale,"rotation":border.dxf.rotation})
+        for at in (border.attribs or []):
+            try: ins.add_attrib(at.dxf.tag or "*",at.dxf.text,at.dxf.insert,dxfattribs={"height":at.dxf.height,"rotation":at.dxf.rotation,"style":at.dxf.style,"layer":at.dxf.layer})
+            except Exception: pass
+        loose=[e for e in best if e.dxftype() in ("MTEXT","TEXT")]
+        imp.import_entities(loose,mm); imp.finalize()
+        ins.explode()
+        for e in list(mm):
+            if e.dxftype() in ("IMAGE","WIPEOUT","ATTDEF"): mm.delete_entity(e)
     loose_h={e.dxf.handle for e in mm if e.dxftype() in ("MTEXT","TEXT")}
-    ins.explode()
-    for e in list(mm):
-        if e.dxftype() in ("IMAGE","WIPEOUT","ATTDEF"): mm.delete_entity(e)
     def txt_of(e): return (clean_mtext(e.text) if e.dxftype()=="MTEXT" else e.dxf.text).strip()
     def pos_of(e): return e.dxf.insert.x,e.dxf.insert.y
     def h_of(e): return e.dxf.char_height if e.dxftype()=="MTEXT" else e.dxf.height
@@ -1216,16 +1270,11 @@ def ensure_cca_block(doc,name):
             elif k=="T": b.add_text(en[1],dxfattribs={"insert":tuple(en[2]),"height":en[3],"rotation":en[4]})
         except Exception: pass
 
-def lighting_pass(E, plan_doc, rcp_scratch, S, u):
-    """Design the lighting plan on the LIGHTING copy (offset 0,0):
-       rooms from the architect's labels (wall-crossing aware), one switching
-       group per fixture type per room, switches at the door latch side,
-       lowercase switching letters, curved conduit runs switch→fixtures.
-       S = model units per paper inch (symbol size), u = model units per real inch."""
+def room_model(plan_doc, u):
+    """Walls (grid-indexed), door arcs, room labels, and the tests built on them.
+       Shared by the lighting and power passes."""
     import math as _m
-    msp=E.modelspace(); pm=plan_doc.modelspace()
-    for ln,col in (("E-SWITCH",4),("E-Wiring",4),("E-LITE-EQPM-IDEN",33)):
-        if ln not in E.layers: E.layers.new(ln).color=col
+    pm=plan_doc.modelspace()
     # ── walls (with a grid index) ──
     walls=[]
     for e in pm:
@@ -1278,10 +1327,20 @@ def lighting_pass(E, plan_doc, rcp_scratch, S, u):
                 best=min(best,_m.hypot(p[0]-px,p[1]-py))
         return best
     # ── rooms (labels) ──
-    rooms=[]
+    raw=[]
     for e in pm:
         if e.dxftype()=="TEXT" and e.dxf.layer=="A-AREA-IDEN":
-            rooms.append((e.dxf.text.replace("%%U","").strip(),(e.dxf.insert.x,e.dxf.insert.y)))
+            raw.append([e.dxf.text.replace("%%U","").strip(),e.dxf.insert.x,e.dxf.insert.y,e.dxf.height or 6*u])
+    # a room name the architect broke across lines ("HIS WALK" / "IN CLOSET") is one label
+    raw.sort(key=lambda r:(-r[2],r[1])); used=[False]*len(raw); rooms=[]
+    for i,a in enumerate(raw):
+        if used[i]: continue
+        name,x,y,h=a; used[i]=True; cnt=1
+        for j,b in enumerate(raw):
+            if used[j]: continue
+            if abs(b[1]-x)<max(6*h,30*u) and 0<y-b[2]<2.2*h:
+                name+=" "+b[0]; used[j]=True; x=(x*cnt+b[1])/(cnt+1); y=(y*cnt+b[2])/(cnt+1); cnt+=1
+        rooms.append((name,(x,y)))
     R=600.0*u
     def room_of(p):
         cand=sorted(((_m.hypot(p[0]-c[0],p[1]-c[1]),i) for i,(n,c) in enumerate(rooms)),key=lambda t:t[0])[:6]
@@ -1293,13 +1352,6 @@ def lighting_pass(E, plan_doc, rcp_scratch, S, u):
             if best is None or key<best[0]: best=(key,i)
             if x==0: break
         return best[1] if best and best[0][0]<=2 else None
-    # ── fixtures ──
-    fx=[]
-    for e in rcp_scratch.modelspace():
-        if e.dxftype()=="INSERT" and e.dxf.layer=="E-LITE-EQPM":
-            t=e.dxf.name.split(" - ")[0].strip(); t=re.sub(r"[-_ ]?\d{6,}.*$","",t)[:12]
-            fx.append(dict(p=(e.dxf.insert.x,e.dxf.insert.y),type=t))
-    for f in fx: f["room"]=room_of(f["p"])
     # ── doors → switch spots ──
     doors=[]
     for e in door_arcs:
@@ -1316,6 +1368,28 @@ def lighting_pass(E, plan_doc, rcp_scratch, S, u):
             wall_pt=(C[0]+(r+8*u)*u1[0],C[1]+(r+8*u)*u1[1])          # strike side, 8" past the jamb
             doors.append(dict(room=rm_,wall=wall_pt,u1=u1,u2=u2,r=r))
         except Exception: pass
+    return dict(walls=walls,nwall=nwall,door_arcs=door_arcs,crossings=crossings,
+                dist_to_walls=dist_to_walls,rooms=rooms,room_of=room_of,doors=doors,cells=_cells,grid=grid)
+
+def lighting_pass(E, plan_doc, rcp_scratch, S, u):
+    """Design the lighting plan on the LIGHTING copy (offset 0,0):
+       rooms from the architect's labels (wall-crossing aware), one switching
+       group per fixture type per room, switches at the door latch side,
+       lowercase switching letters, curved conduit runs switch→fixtures.
+       S = model units per paper inch (symbol size), u = model units per real inch."""
+    import math as _m
+    msp=E.modelspace()
+    for ln,col in (("E-SWITCH",4),("E-Wiring",4),("E-LITE-EQPM-IDEN",33)):
+        if ln not in E.layers: E.layers.new(ln).color=col
+    RM=room_model(plan_doc,u)
+    rooms=RM["rooms"]; room_of=RM["room_of"]; doors=RM["doors"]
+    # ── fixtures ──
+    fx=[]
+    for e in rcp_scratch.modelspace():
+        if e.dxftype()=="INSERT" and e.dxf.layer=="E-LITE-EQPM":
+            t=e.dxf.name.split(" - ")[0].strip(); t=re.sub(r"[-_ ]?\d{6,}.*$","",t)[:12]
+            fx.append(dict(p=(e.dxf.insert.x,e.dxf.insert.y),type=t))
+    for f in fx: f["room"]=room_of(f["p"])
     # ── groups & placement ──
     by_room={}
     for i,f in enumerate(fx):
@@ -1374,6 +1448,103 @@ def lighting_pass(E, plan_doc, rcp_scratch, S, u):
                         nrun+=1; cur=q
     unassigned=sum(1 for f in fx if f["room"] is None)
     return dict(fixtures=len(fx),rooms=len(by_room),switches=nsw,runs=nrun,unassigned=unassigned,doors=len(doors))
+
+def power_pass(E, plan_doc, S, u, ox):
+    """Receptacles on the POWER copy (offset ox). Dwelling rooms follow NEC
+       210.52(A): no point along a wall more than 6 ft from a receptacle, walls
+       under 2 ft skipped. Wet/outdoor rooms get GFCI. Halls get one per long
+       wall. Open commercial areas get perimeter receptacles every 20 ft.
+       Symbols are the firm's Rcpt / Rcpt-gf blocks at the sheet scale."""
+    import math as _m
+    msp=E.modelspace()
+    if "E-EQUIP" not in E.layers: E.layers.new("E-EQUIP").color=4
+    for b in ("Rcpt","Rcpt-gf"): ensure_cca_block(E,b)
+    RM=room_model(plan_doc,u)
+    walls=RM["walls"][:RM["nwall"]]; rooms=RM["rooms"]; room_of=RM["room_of"]; doors=RM["doors"]
+    GFCI=("BATH","TOILET","RESTROOM","W.C","LAVAT","POWDER","SHOWER","KITCHEN","COCINA","PANTRY",
+          "LAUNDRY","LAVAND","GARAGE","GARAJE","TERRACE","PATIO","BALCONY","POOL","BBQ","EXTERIOR",
+          "OUTDOOR","DECK","CARPORT","JANITOR","MECH","UTILITY","SINK","BAR","BREAK","WET")
+    NONE=("CLOSET","CLO.","W.I.C","WIC","STAIR","ELEV","SHAFT","ATTIC","CRAWL","PARKING","DRIVEWAY",
+          "LOT","GREEN","PLANTER","POND","ROOF","PROPERTY","STO.","STORAGE","CHASE","DUCT",
+          "SHOWER","BATHTUB","TUB","WET AREA","CISTERN","GENERATOR")
+    HALL=("HALL","CORRIDOR","FOYER","VESTIBULE","LOBBY","PASSAGE")
+    OPEN=("SHOWROOM","SALES","SERVICE","SHOP","WAREHOUSE","WAITING","LOUNGE","DISPLAY","BAY","AREA")
+    BATH=("BATH","TOILET","RESTROOM","W.C","LAVAT","POWDER","R.R")
+    OUTDOOR=("TERRACE","PATIO","BALCONY","DECK","PORCH","GARDEN","YARD","POOL","BBQ","EXTERIOR","OUTDOOR","CARPORT")
+    UTIL=("LAUNDRY","LAVAND","GARAGE","GARAJE","MECH","UTILITY","JANITOR","ELECT","PANTRY")
+    def category(name):
+        n=name.upper()
+        if any(k in n for k in NONE): return "none"
+        if any(k in n for k in BATH): return "bath"
+        if any(k in n for k in OUTDOOR): return "outdoor"
+        if any(k in n for k in UTIL): return "util"
+        if any(k in n for k in HALL): return "hall"
+        if any(k in n for k in OPEN): return "open"
+        return "room"
+    def is_gfci(name): return any(k in name.upper() for k in GFCI)
+    # points to keep clear: door hinge and strike
+    avoid=[]
+    for d in doors:
+        w=d["wall"]; r=d["r"]; u1=d["u1"]
+        avoid.append(w); avoid.append((w[0]-(r+8*u)*u1[0],w[1]-(r+8*u)*u1[1]))
+    def near_avoid(p,tol):
+        return any(_m.hypot(p[0]-a[0],p[1]-a[1])<tol for a in avoid)
+    placed=[]; per_room={}
+    LIMIT={"bath":1,"outdoor":1,"util":2}
+    # for limited categories, rank each room's facing walls by length and keep the longest
+    facing={}
+    for i,(x1,y1,x2,y2) in enumerate(walls):
+        L=_m.hypot(x2-x1,y2-y1)
+        if L<24*u: continue
+        dx,dy=(x2-x1)/L,(y2-y1)/L; n=(-dy,dx); mid=((x1+x2)/2,(y1+y2)/2)
+        for side in (1,-1):
+            rid=room_of((mid[0]+n[0]*side*8*u,mid[1]+n[1]*side*8*u))
+            if rid is not None: facing.setdefault(rid,[]).append((L,i,side))
+    allowed_walls={}
+    for rid,lst in facing.items():
+        cat=category(rooms[rid][0])
+        if cat in LIMIT:
+            lst.sort(reverse=True); allowed_walls[rid]={(i,s) for _,i,s in lst[:LIMIT[cat]]}
+    def put(p,n,gf,rid):
+        if any(_m.hypot(p[0]-q[0],p[1]-q[1])<18*u for q in placed): return False
+        ang=_m.degrees(_m.atan2(n[1],n[0]))
+        msp.add_blockref("Rcpt-gf" if gf else "Rcpt",(p[0]+ox,p[1]),
+                         dxfattribs={"layer":"E-EQUIP","color":256,"rotation":ang,"xscale":S,"yscale":S})
+        placed.append(p); per_room[rid]=per_room.get(rid,0)+1; return True
+    for i,(x1,y1,x2,y2) in enumerate(walls):
+        L=_m.hypot(x2-x1,y2-y1)
+        if L<24*u: continue
+        dx,dy=(x2-x1)/L,(y2-y1)/L; n=(-dy,dx); mid=((x1+x2)/2,(y1+y2)/2)
+        for side in (1,-1):
+            nin=(n[0]*side,n[1]*side)
+            probe=(mid[0]+nin[0]*8*u,mid[1]+nin[1]*8*u)
+            rid=room_of(probe)
+            if rid is None: continue
+            name=rooms[rid][0]; cat=category(name)
+            if cat=="none": continue
+            gf=is_gfci(name) or cat in ("bath","outdoor")
+            if cat in LIMIT:
+                if (i,side) not in allowed_walls.get(rid,()): continue
+                ts=[L/2]
+            elif cat=="hall":
+                ts=[L/2] if L>=120*u else []
+            elif cat=="open":
+                first,step=min(120*u,L/2),240*u
+                ts=[]; t=first
+                while t<=L-min(120*u,L/2)+1e-6: ts.append(t); t+=step
+                if not ts: ts=[L/2]
+            else:
+                first,step=72*u,144*u
+                if L<=144*u: ts=[L/2]
+                else:
+                    ts=[]; t=first
+                    while t<L-72*u+1e-6: ts.append(t); t+=step
+                    if L-ts[-1]>72*u: ts.append(L-72*u)
+            for t in ts:
+                p=(x1+dx*t+nin[0]*1.5*u, y1+dy*t+nin[1]*1.5*u)
+                if near_avoid(p,16*u): continue
+                put(p,nin,gf,rid)
+    return dict(receptacles=len(placed),rooms=len(per_room))
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PREVIEWS — PNG renders so nothing has to be opened in AutoCAD to check it
@@ -1448,13 +1619,28 @@ wrap.addEventListener('dblclick',()=>{vb=orig.slice();apply();});
 </script></body></html>'''
 def viewer_html(svg): return _VIEWER_HTML.replace("__SVG__",svg)
 
-def build_previews(outdir, floors, rcp_scratch, has_rcp):
+def build_previews(outdir, floors, rcp_scratch, has_rcp, power_ox=None):
     """Floor plans (labels), lighting copy with the RCP, and the E-101 sheet with its frame."""
     previews=[]
     try:
         plan=ezdxf.readfile(str(outdir/"x-plan.dxf"))
         views=[(f"Plan — {n}" if n else "Plan",b) for n,b in floors] if floors else [("Plan",None)]
         for k,v in render_svgs(plan,views).items(): previews.append((k,v))
+        # power design: receptacles from E-Electrical's POWER copy, shifted back onto the plan
+        if power_ox is not None:
+            try:
+                from ezdxf.addons import Importer as _Imp
+                Ed=ezdxf.readfile(str(outdir/"E-Electrical Plan.dxf"))
+                rc=[e for e in Ed.modelspace() if e.dxftype()=="INSERT" and e.dxf.layer=="E-EQUIP"]
+                if rc:
+                    pp=ezdxf.readfile(str(outdir/"x-plan.dxf"))
+                    _d=_Imp(Ed,pp); _d.import_entities(rc,pp.modelspace()); _d.finalize()
+                    for e in list(pp.modelspace())[-len(rc):]:
+                        try: e.translate(-power_ox,0,0)
+                        except Exception: pass
+                    if "E-EQUIP" in pp.layers: pp.layers.get("E-EQUIP").color=4
+                    for k,v in render_svgs(pp,[(f"Power design — {n}" if n else "Power design",b) for n,b in floors],black=False).items(): previews.append((k,v))
+            except Exception as ex: print("power preview:",ex)
         if has_rcp and rcp_scratch is not None:
             from ezdxf.addons import Importer
             blocks=[e for e in rcp_scratch.modelspace() if e.dxftype() in ("INSERT","TEXT")]
@@ -1631,10 +1817,16 @@ def process_files(uploaded_files):
         floors.append((name,b))
     E,made,scale_label,F=build_electrical(union,rcp_scratch,minfo,ins_units,project,split,
                                         fbox=fbox if len(fw)>=20 else None, floors=floors)
-    lighting=None
+    lighting=None; power=None
     if rcp_scratch is not None:
         try: lighting=lighting_pass(E,base,rcp_scratch,F*UNIT_PER_IN.get(ins_units,1.0),UNIT_PER_IN.get(ins_units,1.0))
         except Exception as ex: debug.append(f"lighting error: {ex}")
+    try:
+        xs=sorted(e.dxf.insert.x for e in E.modelspace() if e.dxftype()=="INSERT" and e.dxf.name=="x-plan")
+        pox=xs[1] if len(xs)>1 else 0.0
+        power=power_pass(E,base,F*UNIT_PER_IN.get(ins_units,1.0),UNIT_PER_IN.get(ins_units,1.0),pox)
+        power["ox"]=pox
+    except Exception as ex: debug.append(f"power error: {ex}")
     files["E-Electrical Plan.dxf"]=E
 
     # write, convert, zip
@@ -1643,7 +1835,7 @@ def process_files(uploaded_files):
         p=outdir/name; doc.saveas(str(p))
         d=dxf_to_dwg(p)
         (dwg_ok if d else dwg_fail).append(name)
-    try: previews=build_previews(outdir,floors,rcp_scratch,rcp_scratch is not None)
+    try: previews=build_previews(outdir,floors,rcp_scratch,rcp_scratch is not None,power_ox=(power or {}).get("ox"))
     except Exception: previews=[]
     buf=io.BytesIO()
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as z:
@@ -1656,6 +1848,7 @@ def process_files(uploaded_files):
     msg+=f"; marco {'extracted from '+plan_sheets[0].name if minfo.get('found') else 'NOT found (generic frame)'}"
     if rcp_diag: msg+="; RCP "+" | ".join(rcp_diag)
     if lighting: msg+=f"; LIGHTING {lighting['fixtures']} fixtures in {lighting['rooms']} rooms ({lighting['unassigned']} unassigned), {lighting['doors']} doors, {lighting['switches']} switches, {lighting['runs']} runs"
+    if power: msg+=f"; POWER {power['receptacles']} receptacles in {power['rooms']} rooms"
     if dwg_fail: msg+=f"; DWG conversion failed for {', '.join(dwg_fail)} (DXF included)"
     if debug: msg+=" | "+" | ".join(debug)
     return (buf.getvalue(),previews), msg+".", None
